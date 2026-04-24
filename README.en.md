@@ -8,6 +8,8 @@
 
 Model any long project as an **ordered chain of contracts**: progress, dependencies, and blast radius all live on disk. Stability comes from files and scripts in the repo, not from the model's memory.
 
+> _"Move AI stability out of model memory and into the repository filesystem."_
+
 [![install](https://img.shields.io/badge/install-npx%20skills%20add-informational?logo=npm)](https://www.npmjs.com/package/skills)
 [![Copilot](https://img.shields.io/badge/GitHub%20Copilot-supported-24292e?logo=github)](./references/agent-instructions-template.md)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-supported-d97757)](./references/agent-instructions-template.md)
@@ -155,6 +157,7 @@ The evolutionary motto stays the same: **replace "AI self-discipline" with "scri
 ## Documentation map
 
 - [SKILL.md](./SKILL.md) — full scaffolding procedure and quality gates
+- [references/glossary.md](./references/glossary.md) — glossary of concepts and terms (contract chain, three invariants, four failure modes, scheduler commands, adjacent-concept comparison)
 - [references/methodology.md](./references/methodology.md) — complete methodology (three invariants, eight principles, enforcement layer, hard constraints)
 - [references/templates.md](./references/templates.md) — `manifest` / `common` / `state` / `handoff` templates
 - [references/phase-templates.md](./references/phase-templates.md) — two-layer contract templates (positioning + execution)
