@@ -4,6 +4,13 @@
 
 ### Added
 
+- Placeholder-contract enforcement for the current phase. `planctl next`,
+  `resolve`, `status`, `resume`, and `doctor` now treat a phase as not
+  ready when its `plan_file` / `execution_file` still carry
+  `PHASE_CONTRACT_PLACEHOLDER` (or legacy placeholder phrasing in the file
+  header). In `--strict`, this exits 2 and tells the agent to upgrade both
+  contracts before implementation.
+
 - `planctl revert <phase-id> [--mode revert|reset] [--summary TEXT]`
   — rolls a completed phase back by locating its milestone commit, running
   either `git revert` (default, safe to push) or `git reset --hard`
@@ -58,7 +65,21 @@
 
 ### Documentation
 
-- `references/methodology.md` §9 now declares 9 hard constraints, with
+- Introduced a formal placeholder-contract protocol in
+  `references/phase-templates.md`, including the machine-readable
+  `PHASE_CONTRACT_PLACEHOLDER` sentinel, paired future-phase stubs, and the
+  rule that both contracts must be promoted together before implementation.
+- `SKILL.md`, `references/workflow-template.md`, and
+  `references/agent-instructions-template.md` now define the same Golden
+  Loop boundary behavior: after `complete`, immediately rerun
+  `next --strict`; if the new current phase is placeholder-only, upgrade
+  both contracts first instead of asking the user for confirmation.
+- `references/methodology.md`, `README.md`, and `README.zh-CN.md` now say
+  the same thing about phase boundaries and clarify that
+  `planctl handoff --write` is a manual recovery tool, not a normal
+  follow-up step after every `complete`.
+
+- `references/methodology.md` §9 now declares 10 hard constraints, with
   a new rule forbidding agents from running `git commit` / `git push` /
   `git tag` during phase execution — milestone commit authority is
   exclusively `planctl complete`.
@@ -68,12 +89,12 @@
 - `references/workflow-template.md` now includes a "如何回退一个 Phase"
   section covering `--mode revert` vs `--mode reset` and the expected
   follow-up `planctl next --strict`.
-- `references/agent-instructions-template.md` §八 adds rule #9 requiring
+- `references/agent-instructions-template.md` §八 adds rule #10 requiring
   all phase rollbacks to go through `planctl revert`, never manual
   `git revert` / `git reset` / manual `state.yaml` edits; and clarifies
   that `complete` already refreshes `handoff.md` atomically so
   `handoff --write` is a manual recovery tool, not a required follow-up.
-- `SKILL.md` Quality Gate references "9 条硬约束", Decision Points
+- `SKILL.md` Quality Gate references "10 条硬约束", Decision Points
   gained dedicated entries for revert, allowed_paths enforcement,
   cold-start resume, and repo doctor; Prerequisites now lists Ruby
   ≥ 2.6 alongside the git work-tree check; Golden Loop no longer

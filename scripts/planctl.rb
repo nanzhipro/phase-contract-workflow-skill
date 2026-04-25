@@ -15,6 +15,17 @@ class PlanCtl
   GIT_GUARD_EXIT_CODE = 3
   ALWAYS_ALLOWED_PATHS = %w[plan/state.yaml plan/handoff.md .gitignore].freeze
   STATE_SCHEMA_VERSION = 1
+  PLACEHOLDER_SENTINELS = %w[PHASE_CONTRACT_PLACEHOLDER PHASE-CONTRACT-PLACEHOLDER].freeze
+  PLACEHOLDER_HEADER_LINE_LIMIT = 40
+  PLACEHOLDER_HINT_PATTERNS = [
+    /当前.*占位合同/,
+    /占位合同.*禁止实施/,
+    /禁止开始实现/,
+    /升级(?:成|为)?正式合同/,
+    /placeholder contract/i,
+    /do not implement/i,
+    /upgrade .* formal contract/i
+  ].freeze
 
   def initialize(repo_root)
     @repo_root = Pathname.new(repo_root)
@@ -61,6 +72,9 @@ class PlanCtl
       puts
       if result['next_phase']
         puts "Next phase: #{result['next_phase']['phase_id']} #{result['next_phase']['title']}"
+        unless Array(result['next_phase']['placeholder_contract_files']).empty?
+          puts "Next phase status: placeholder contracts need upgrade first (#{result['next_phase']['placeholder_contract_files'].join(', ')})"
+        end
       else
         puts 'Next phase: none'
       end
@@ -79,7 +93,12 @@ class PlanCtl
         puts '- none'
       else
         result['blocked_phases'].each do |phase|
-          puts "- #{phase['phase_id']}: waiting for #{phase['missing_dependencies'].join(', ')}"
+          reasons = []
+          reasons << "waiting for #{phase['missing_dependencies'].join(', ')}" unless phase['missing_dependencies'].empty?
+          unless Array(phase['placeholder_contract_files']).empty?
+            reasons << "placeholder contracts: #{phase['placeholder_contract_files'].join(', ')}"
+          end
+          puts "- #{phase['phase_id']}: #{reasons.join('; ')}"
         end
       end
       puts
@@ -88,7 +107,12 @@ class PlanCtl
         puts '- none'
       else
         result['remaining_queue'].each do |phase|
-          detail = phase['missing_dependencies'].empty? ? phase['status'] : "#{phase['status']} (waiting for #{phase['missing_dependencies'].join(', ')})"
+          detail_parts = [phase['status']]
+          detail_parts << "waiting for #{phase['missing_dependencies'].join(', ')}" unless phase['missing_dependencies'].empty?
+          unless Array(phase['placeholder_contract_files']).empty?
+            detail_parts << "placeholder contracts: #{phase['placeholder_contract_files'].join(', ')}"
+          end
+          detail = detail_parts.join(' | ')
           puts "- #{phase['phase_id']}: #{phase['title']} [#{detail}]"
         end
       end
@@ -394,6 +418,14 @@ class PlanCtl
         problems << "state.yaml lists completed phase #{id}, which is not in manifest." unless known_ids.include?(id)
       end
       warnings << 'state.yaml exists but plan/handoff.md is missing; run `planctl handoff --write`.' unless handoff_path.file?
+
+      next_phase = first_remaining_phase(Array(state['completed_phases']))
+      if next_phase
+        placeholders = placeholder_contract_files_for(next_phase)
+        unless placeholders.empty?
+          problems << "current phase #{next_phase['id']} still uses placeholder contract file(s): #{placeholders.join(', ')}. Upgrade both contracts before implementation."
+        end
+      end
     else
       warnings << 'state.yaml not created yet; run `planctl next --strict` or complete a phase.' if handoff_path.file?
     end
@@ -653,6 +685,7 @@ class PlanCtl
     missing_dependencies = dependencies - completed
     required_context = normalized_context_for(phase)
     missing_context_files = required_context.reject { |path| @repo_root.join(path).file? }
+    placeholder_contract_files = placeholder_contract_files_for(phase)
 
     {
       'phase_id' => phase['id'],
@@ -664,36 +697,52 @@ class PlanCtl
       'completed_dependencies' => dependencies & completed,
       'missing_dependencies' => missing_dependencies,
       'missing_context_files' => missing_context_files,
+      'placeholder_contract_files' => placeholder_contract_files,
       'resolver' => @manifest.dig('execution_rule', 'resolver'),
       'state_file' => state_file_relative,
       'handoff_file' => handoff_file_relative,
-      'ready' => missing_dependencies.empty? && missing_context_files.empty?
+      'ready' => missing_dependencies.empty? && missing_context_files.empty? && placeholder_contract_files.empty?
     }
   end
 
   def build_status_result(state)
     completed = Array(state['completed_phases'])
     phases = manifest_phases
-    available = phases.select do |phase|
-      !completed.include?(phase['id']) && (Array(phase['depends_on']) - completed).empty?
-    end
+    available = []
 
     blocked = phases.each_with_object([]) do |phase, result|
       next if completed.include?(phase['id'])
-      next if available.any? { |candidate| candidate['id'] == phase['id'] }
+
+      missing_dependencies = Array(phase['depends_on']) - completed
+      placeholder_contract_files = placeholder_contract_files_for(phase)
+
+      if missing_dependencies.empty? && placeholder_contract_files.empty?
+        available << summarize_phase(phase)
+        next
+      end
 
       result << {
         'phase_id' => phase['id'],
         'title' => phase['title'],
-        'missing_dependencies' => Array(phase['depends_on']) - completed
+        'missing_dependencies' => missing_dependencies,
+        'placeholder_contract_files' => placeholder_contract_files
       }
     end
 
     remaining_queue = phases.reject { |phase| completed.include?(phase['id']) }.map do |phase|
       missing_dependencies = Array(phase['depends_on']) - completed
+      placeholder_contract_files = placeholder_contract_files_for(phase)
+      status = if missing_dependencies.empty? && placeholder_contract_files.empty?
+                 'ready'
+               elsif missing_dependencies.empty?
+                 'contract-placeholder'
+               else
+                 'blocked'
+               end
       summarize_phase(phase).merge(
-        'status' => missing_dependencies.empty? ? 'ready' : 'blocked',
-        'missing_dependencies' => missing_dependencies
+        'status' => status,
+        'missing_dependencies' => missing_dependencies,
+        'placeholder_contract_files' => placeholder_contract_files
       )
     end
 
@@ -766,13 +815,21 @@ class PlanCtl
       puts
       puts 'Context file status:'
       puts "- missing files: #{format_list(result['missing_context_files'])}"
+      puts "- placeholder contracts: #{format_list(result['placeholder_contract_files'])}"
       puts
       puts 'Execution contract:'
       puts '- Do not start implementation before reading every required_context file.'
       puts '- Treat plan/common.md as the global hard constraints.'
       puts '- Treat the execution file as the scope boundary, deliverable contract, and completion checklist.'
       puts '- If dependencies or required context files are missing, stop and report the blocker instead of editing files.'
-      puts '- For long multi-phase runs, complete this phase with a summary and refresh plan/handoff.md before moving on.'
+      if result['placeholder_contract_files'].empty?
+        puts '- If the phase is ready, continue implementation without asking for an extra confirmation at the phase boundary.'
+      else
+        puts '- Current phase is still placeholder-only. Upgrade both the phase plan and execution contracts to formal contracts first.'
+        puts '- Do not start implementation yet, and do not ask the user for a confirmation that the workflow already implies.'
+        puts '- After upgrading the contracts, rerun the same strict command and only start implementation when placeholder contracts are gone.'
+      end
+      puts '- For long multi-phase runs, complete this phase with a summary; complete already refreshes plan/handoff.md atomically.'
     end
   end
 
@@ -819,6 +876,9 @@ class PlanCtl
       puts
       if snapshot['next_phase']
         puts "Next phase: #{snapshot['next_phase']['phase_id']} #{snapshot['next_phase']['title']}"
+          unless Array(snapshot['next_phase']['placeholder_contract_files']).empty?
+            puts "Next phase status: placeholder contracts need upgrade first (#{snapshot['next_phase']['placeholder_contract_files'].join(', ')})"
+          end
         puts 'Read these files next:'
         snapshot['next_required_context'].each_with_index do |path, index|
           puts "#{index + 1}. #{path}"
@@ -882,6 +942,9 @@ class PlanCtl
       lines << "- `#{snapshot['next_phase']['phase_id']}` #{snapshot['next_phase']['title']}"
       lines << "- plan: `#{snapshot['next_phase']['plan_file']}`"
       lines << "- execution: `#{snapshot['next_phase']['execution_file']}`"
+      unless Array(snapshot['next_phase']['placeholder_contract_files']).empty?
+        lines << "- status: `placeholder contracts need upgrade first (#{snapshot['next_phase']['placeholder_contract_files'].join(', ')})`"
+      end
       lines << ''
       lines << '下一步读取顺序：'
       snapshot['next_required_context'].each_with_index do |path, index|
@@ -911,7 +974,7 @@ class PlanCtl
     continuous_execution = snapshot['continuous_execution']
     lines << "- next: `#{continuous_execution['next_command']}`" if continuous_execution['next_command']
     lines << "- complete: `#{continuous_execution['completion_command']}`" if continuous_execution['completion_command']
-    lines << "- handoff: `ruby scripts/planctl handoff --write`"
+    lines << "- handoff-repair (manual recovery only): `ruby scripts/planctl handoff --write`"
     lines << ''
 
     lines.join("\n")
@@ -941,6 +1004,22 @@ class PlanCtl
 
   def format_list(values)
     values.empty? ? 'none' : values.join(', ')
+  end
+
+  def placeholder_contract_files_for(phase)
+    [phase['plan_file'], phase['execution_file']].compact.select { |path| contract_placeholder?(path) }
+  end
+
+  def contract_placeholder?(relative_path)
+    path = @repo_root.join(relative_path)
+    return false unless path.file?
+
+    header = path.read.lines.first(PLACEHOLDER_HEADER_LINE_LIMIT).join
+    return true if PLACEHOLDER_SENTINELS.any? { |marker| header.include?(marker) }
+
+    return false unless header.match?(/占位|placeholder/i)
+
+    PLACEHOLDER_HINT_PATTERNS.any? { |pattern| header.match?(pattern) }
   end
 
   def fetch_phase(phase_id)

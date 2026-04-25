@@ -99,6 +99,8 @@ ruby scripts/planctl complete <id> --summary "..." --next-focus "..."
 ruby scripts/planctl doctor                            # repo health check (SHA256-diff the three instruction files, etc.)
 ```
 
+Phase boundaries are internal, not user confirmation points. After `complete`, immediately rerun `next --strict`; if the new current Phase is still a placeholder pair, promote both contracts to formal docs first. Details live in [references/phase-templates.md](./references/phase-templates.md) and [references/workflow-template.md](./references/workflow-template.md).
+
 ## Design principles
 
 - **Externalize state** - progress goes to files, not memory.
@@ -142,6 +144,8 @@ When used as an Agent Skill, just say "plan XXX with Phase-Contract" inside Copi
 ```
 
 For manual installation into an existing project, copy `scripts/planctl.rb` in and generate the rest from the templates - details in [SKILL.md](./SKILL.md).
+
+Only the current Phase needs a formal contract on day one. Future Phases can stay as placeholder pairs until entry, then be promoted when `next --strict` reaches them.
 
 ## Roadmap
 

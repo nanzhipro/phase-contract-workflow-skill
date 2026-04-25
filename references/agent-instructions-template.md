@@ -46,6 +46,7 @@
 3. 指定 phase 时，`planctl resolve` 返回的结果，是唯一合法的当前 phase。
 4. 不得跳过 `depends_on` 检查，也不得手工判定“前置 phase 基本完成”。
 5. 只要 strict 模式失败，就视为当前 phase 尚不具备实施条件。
+6. 若 strict 只因当前 phase 的 `phases/*.md` / `execution/*.md` 仍是占位合同而失败，这不是用户确认点；下一动作必须是先把两份合同升级成正式合同，再重跑同一条 strict 命令。
 
 ## 五、上下文装载规约
 
@@ -79,7 +80,7 @@
 
 1. resolver 报告依赖未满足。
 2. resolver 报告上下文文件缺失。
-3. strict 模式失败。
+3. strict 模式因依赖缺失、上下文缺失或其他外部条件未满足而失败。若 strict 只因当前 phase 仍是占位合同而失败，不算 blocker，按第八节先补正式合同。
 3a. 当前项目根不是 git 工作区，且未显式设置 `PHASE_CONTRACT_ALLOW_NON_GIT=1`。此时 `scripts/planctl` 的 `next` / `resolve` / `complete` / `handoff` 会以 exit code 3 拒绝运行，必须先让用户补齐 `git init` 基线，不得绕过。
 4. 当前工作树中存在与当前 phase 契约直接冲突、且无法在不破坏用户已有修改的前提下兼容的变更。
 5. 用户请求与当前 manifest 定义的 phase 顺序、边界或完成规则直接冲突，而规划体系本身尚未被更新。
@@ -94,10 +95,11 @@
 3. 未写入 `plan/state.yaml` 的 phase，不视为完成。
 4. `complete` 会在一次调用内原子地刷新 `plan/state.yaml` 与 `plan/handoff.md`（tmp+rename），正常情况下**不需要**再额外跑 `ruby scripts/planctl handoff --write`；后者仅作为手工补救手段，当发现 handoff 与 state 失步或手动编辑过其中之一时再用。
 5. 不得在未运行 `complete` 的情况下，直接开始后续 phase。
-6. `complete` 会在写回 `state.yaml` / `handoff.md` 之后执行 `git add -A` → `git commit -F -`（地道英文 commit message：`chore(plan): complete <phase-id> — <title>`，带 `Phase-Id` / `Next-Focus` trailers） → `git push`（无 upstream 时回退到 `git push -u origin HEAD`；若仓库没有任何 remote，则只保留本地 commit 并继续，不得因此中止任务）。但在调用 `complete` 之前，AI 必须先根据当前 phase 产生的未跟踪文件自行推理哪些属于构建 / 编译 / 运行 / 测试中间产物，并在需要时更新根目录 `.gitignore`；判断标准以“是否可从源码或命令重新生成、是否属于真实交付物、是否被项目约定要求入库”为准，不能把 fixture、快照基线、lockfile、必须提交的生成代码/文档误判为垃圾。在当前 phase 实施期间**不得**自行 `git commit` 或 `git push`，以免产生半成品提交或提交信息风格漂移；把里程碑记录权统一交给 `complete`。
-7. 允许设置 `PHASE_CONTRACT_SKIP_PUSH=1`（仅本地 commit）或 `PHASE_CONTRACT_SKIP_COMMIT=1`（跳过整条 git 收尾）仅用于离线 / 排障等特殊场景，默认不要使用；若仓库天然没有 remote，也不要把它当成阻塞条件，应继续执行并在对用户的汇报里明确说明当前只落本地里程碑。若 AI 基于上述推理更新了 `.gitignore`，应将其视为正常基础设施变更，而不是越界编辑。
-8. 若 `complete` 的 commit 或 push 失败，`state.yaml` 仍会保持已完成状态（不回滚）；应当向用户报告 warning 原文并提示手动处置（鉴权、保护分支、pre-commit hook 等），而不是尝试手动 `git reset` 或伪造提交。
-9. 回退某个已完成 phase 时必须走 `ruby scripts/planctl revert <phase-id>`，不得手工 `git revert` / `git reset` 也不得手工改 `state.yaml`；script 会负责定位里程碑 commit、保护下游依赖、重写 state/handoff 并提交 ledger。
+6. `complete` 之后，必须立刻再次运行 `ruby scripts/planctl next --format prompt --strict`（或在用户明确指定 phase 时运行对应的 `resolve --strict`）。若新 current phase 仍是占位合同，先补齐该 phase 的正式 `phases/*.md` 与 `execution/*.md`，再重跑同一条 strict 命令；strict 通过前不得开始实现，也不得停下来向用户索取本应内部完成的继续许可。
+7. `complete` 会在写回 `state.yaml` / `handoff.md` 之后执行 `git add -A` → `git commit -F -`（地道英文 commit message：`chore(plan): complete <phase-id> — <title>`，带 `Phase-Id` / `Next-Focus` trailers） → `git push`（无 upstream 时回退到 `git push -u origin HEAD`；若仓库没有任何 remote，则只保留本地 commit 并继续，不得因此中止任务）。但在调用 `complete` 之前，AI 必须先根据当前 phase 产生的未跟踪文件自行推理哪些属于构建 / 编译 / 运行 / 测试中间产物，并在需要时更新根目录 `.gitignore`；判断标准以“是否可从源码或命令重新生成、是否属于真实交付物、是否被项目约定要求入库”为准，不能把 fixture、快照基线、lockfile、必须提交的生成代码/文档误判为垃圾。在当前 phase 实施期间**不得**自行 `git commit` 或 `git push`，以免产生半成品提交或提交信息风格漂移；把里程碑记录权统一交给 `complete`。
+8. 允许设置 `PHASE_CONTRACT_SKIP_PUSH=1`（仅本地 commit）或 `PHASE_CONTRACT_SKIP_COMMIT=1`（跳过整条 git 收尾）仅用于离线 / 排障等特殊场景，默认不要使用；若仓库天然没有 remote，也不要把它当成阻塞条件，应继续执行并在对用户的汇报里明确说明当前只落本地里程碑。若 AI 基于上述推理更新了 `.gitignore`，应将其视为正常基础设施变更，而不是越界编辑。
+9. 若 `complete` 的 commit 或 push 失败，`state.yaml` 仍会保持已完成状态（不回滚）；应当向用户报告 warning 原文并提示手动处置（鉴权、保护分支、pre-commit hook 等），而不是尝试手动 `git reset` 或伪造提交。
+10. 回退某个已完成 phase 时必须走 `ruby scripts/planctl revert <phase-id>`，不得手工 `git revert` / `git reset` 也不得手工改 `state.yaml`；script 会负责定位里程碑 commit、保护下游依赖、重写 state/handoff 并提交 ledger。
 
 ## 九、压缩恢复规约
 
@@ -114,6 +116,7 @@
 - 不得绕过 `planctl` 手工选择当前 phase。
 - 不得跳过 `depends_on` 检查。
 - 不得把未来 phase 的目标、交付或代码实现提前混入当前 phase。
+- 不得把 phase 边界或占位合同升级误判成需要用户确认的停顿点；连续执行时，这属于 Golden Loop 内部步骤。
 - 不得一次性加载全部 phase 文档，导致当前上下文被未来阶段信息污染。
 - 不得手工编辑 `plan/state.yaml` 和 `plan/handoff.md` 来伪造进度或恢复状态，除非任务本身就是维护流程基础设施。
 - 不得在未满足当前 phase 完成条件时宣告完成。

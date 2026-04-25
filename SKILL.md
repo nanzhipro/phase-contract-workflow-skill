@@ -130,9 +130,12 @@ argument-hint: "(optional) target project path and short project description"
 
 把 [scripts/planctl.rb](./scripts/planctl.rb) 复制到目标项目的 `scripts/planctl`，加可执行位：`chmod +x scripts/planctl`。planctl **不内置固定的中间产物名单**；这部分交给 AI 在 phase 实施中结合未跟踪文件、构建/编译/运行/测试命令输出、路径语义和“是否可从源码重新生成”自行推理。凡被判断为临时输出的路径，AI 应在 `complete` 前把精确规则写入根目录 `.gitignore`，避免 `git add -A` 把它们带进里程碑提交；凡属于真实交付物、fixture、快照基线、lockfile、必须入库的生成代码/文档，则不得误忽略。跑一次 `ruby scripts/planctl status` 自检，再跑 `ruby scripts/planctl doctor` 做一次完整体检（Ruby 版本、git 工作区、manifest 引用、state/handoff 一致性、三份 agent 指令 SHA256 比对）。
 
-### Step 4: 生成第一个 phase 的双层合同
+### Step 4: 生成第一批 phase 合同
 
-只为 `phase-0`（和用户明确想立刻启动的 phase）生成 `phases/*` 和 `execution/*`。**后续 phase 的文档在进入该 phase 前再写**，不要一次写完——那会破坏"只装 3 份文档"的不变量，也会被后续认知更新所推翻。
+- 为 `phase-0`（和用户明确想立刻启动的 phase）生成**正式**的 `phases/*` 和 `execution/*`
+- 为其余 future phase 生成**成对占位合同**，使用 [references/phase-templates.md](./references/phase-templates.md) 里的 `PHASE_CONTRACT_PLACEHOLDER` 模板
+
+不要一次把所有 future phase 都写成正式合同——那会破坏"只装 3 份文档"的不变量，也会被后续认知更新推翻；但也不要留空文件，因为 `planctl doctor` 需要验证 manifest 引用存在，而 `next --strict` / `resolve --strict` 需要在该 phase 轮到当前时识别它仍是占位合同并 exit 2。
 
 模板见 [references/phase-templates.md](./references/phase-templates.md)。
 
@@ -167,10 +170,12 @@ ruby scripts/planctl next --format prompt --strict
 # 实施该 phase 后标记完成（自动刷新 handoff、并 git add -A / commit / push 本 phase 的里程碑）
 ruby scripts/planctl complete <phase-id> --summary "<做了什么>" --next-focus "<下一个 phase 要关注什么>"
 
-# 进入下一 phase 前，再写它的 phases/*.md 和 execution/*.md
+# complete 后立刻再次运行 next --strict；若当前 phase 仍是占位合同，先补正式合同，再开始实现
 ```
 
 > 注：`complete` 已自动 `write_state` → `write_handoff_file`（均为 tmp+rename 原子写入）。`ruby scripts/planctl handoff --write` 仅作为**手动补救**：比如你手改了 `state.yaml` 但忘了别的联动刷新，或 `complete` 后 `handoff.md` 被意外编辑需要重放。正常循环不需要多这一步。
+
+> 若 `next --strict` / `resolve --strict` 只因当前 phase 的 `phases/*.md` / `execution/*.md` 仍带 `PHASE_CONTRACT_PLACEHOLDER` 而 exit 2，这不是用户确认点，而是 Golden Loop 内部待办：先把两份文件升级成正式合同，再重跑同一条 strict 命令。
 
 **压缩恢复 / 冷启动**：新会话开场只需一条命令，替代手动读三份文件：
 
@@ -192,6 +197,7 @@ ruby scripts/planctl doctor
 
 - 压缩或新会话恢复**永远且仅**三步：读 manifest → 读 handoff → 跑 `next --strict`（或一步 `resume --strict`）
 - `complete` 是写回 state + handoff + git 里程碑的原子入口；**不要**再对其补一次 `handoff --write`，未跑 `complete` 的 phase 则直接不视为完成
+- `complete` 之后必须立刻再次解析下一 phase；若 strict 因占位合同失败，先升级该 phase 的两份合同，不要停下来问用户是否继续
 - 未写入 `state.yaml` 的 phase 不视为完成，不管 AI 自己说做得多好
 
 ### Step 7: 里程碑提交与推送（`complete` 自动执行）
@@ -236,7 +242,9 @@ To git@github.com:acme/widget.git
 
 **common.md 写到第 15 条还刹不住**：区分"约束"（永恒不变）和"策略"（可能变化），把后者下放到具体 phase。
 
-**用户说"phase 文档 AI 帮我全写了吧"**：只写 phase-0 的。manifest 和 common 必须由用户主导，否则 AI 拟合会把全局带偏。
+**用户说"phase 文档 AI 帮我全写了吧"**：只把 phase-0（和准备立刻启动的 phase）写成正式合同；future phase 先保留占位合同。manifest 和 common 必须由用户主导，否则 AI 拟合会把全局带偏。
+
+**`next --strict` 指向的新 phase 仍是占位合同**：这不是 blocker，也不是用户确认点。先把该 phase 的 `phases/*.md` 和 `execution/*.md` 同步升级成正式合同，再 rerun 同一条 strict 命令；strict 通过前不得开始实现。
 
 **用户已有 phase 结构但没有 planctl 体系**：跳过 Step 1.3–1.4，仅生成基础设施（manifest、common、workflow、planctl、三份 agent 指令），把已有 phase 文档纳入 manifest。
 
@@ -258,11 +266,13 @@ To git@github.com:acme/widget.git
 - [ ] `common.md` 只包含永远不变的约束，无实施步骤
 - [ ] `phases/phase-0-*.md` 的"完成判定"全部为客观可勾选项
 - [ ] `execution/phase-0-*.md` 的"允许改动"是路径白名单而非能力描述
+- [ ] `phase-0`（和任何准备立刻启动的 phase）使用正式合同；尚未进入的 future phase 使用带 `PHASE_CONTRACT_PLACEHOLDER` 的成对占位合同，且哨兵位于文件前 40 行
 - [ ] `execution/phase-0-*.md` 包含"执行裁决规则"一票否决条款
-- [ ] `.github/copilot-instructions.md`、`CLAUDE.md`、`AGENTS.md` 三份内容完全一致，均包含 9 条硬约束（见 [references/methodology.md §9](./references/methodology.md)）
+- [ ] `.github/copilot-instructions.md`、`CLAUDE.md`、`AGENTS.md` 三份内容完全一致，均包含 10 条硬约束（见 [references/methodology.md §9](./references/methodology.md)）
 - [ ] 三份 agent 指令**不得引入 agent-specific 段落**（任何"仅 Claude 看"、"仅 Copilot 看"的差异都会让 `planctl doctor` 的 SHA256 比对报错）；若确需差异，改为在 `plan/common.md` 里用"按 agent 区分"的小节承载
 - [ ] `scripts/planctl` 可执行，`ruby scripts/planctl status` 跑通
 - [ ] `planctl next --strict` 返回 phase-0 且 required_context 为三份
+- [ ] 当某个 future phase 仍是占位合同且它变成 current phase 时，`planctl next --strict` / `resolve --strict` 会以 exit 2 拒绝开始实现，直到两份合同被升级
 - [ ] 首次 `complete` 前若仓库已出现未跟踪中间产物，AI 已基于可再生性、交付边界与项目约定自行判断并更新根目录 `.gitignore`，且不会把这些产物带进里程碑提交
 - [ ] 若目标项目已配置 `git remote`，其当前分支可推送；若暂时无 remote，已在对用户的交付说明里明确说明：后续 `complete` 将仅本地 commit、跳过 push，但**不阻塞**继续执行后续任务
 

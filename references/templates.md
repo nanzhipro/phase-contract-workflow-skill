@@ -29,6 +29,9 @@ execution_rule:
     next_command: ruby scripts/planctl next --format prompt --strict
     completion_command: >-
       ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>"
+    # complete 之后必须立刻再次运行 next --strict。
+    # 若新 current phase 的 plan/execution 仍带 PHASE_CONTRACT_PLACEHOLDER，
+    # 先把两份文件升级成正式合同，再开始实现；不要把这一步当成用户确认点。
   enforcement:
     dependency_check: true
     stop_on_missing_context: true
@@ -79,6 +82,12 @@ phases:
       - plan/execution/phase-1-<slug>.md
     depends_on:
       - phase-0
+  # 对于尚未进入的 future phase，建议先生成成对占位文件而不是空文件：
+  # - plan/phases/phase-X-<slug>.md
+  # - plan/execution/phase-X-<slug>.md
+  # 两份文件都在前 40 行内保留 `PHASE_CONTRACT_PLACEHOLDER` 哨兵；
+  # 当该 phase 成为 current phase 时，`next --strict` / `resolve --strict` 会 exit 2，
+  # 逼 agent 先补正式合同，再进入实现。
   # …后续 phase 按同样结构追加
 ```
 
@@ -87,6 +96,7 @@ phases:
 - `required_context` 恰好三项（common + plan + execution），不要多也不要少
 - `depends_on` 只写真实依赖，禁止循环
 - `compression_control.rules` 三条硬规则保持不变
+- 尚未进入的 future phase 若不写正式合同，必须使用带 `PHASE_CONTRACT_PLACEHOLDER` 的成对占位文件；不要留空文件
 
 ---
 
@@ -213,7 +223,7 @@ updated_at: null
 
 - next: `ruby scripts/planctl next --format prompt --strict`
 - complete: `ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>"`
-- handoff: `ruby scripts/planctl handoff --write`
+- handoff-repair (manual recovery only): `ruby scripts/planctl handoff --write`
 ```
 
-**注意**：`planctl handoff --write` 会以这个结构覆盖写入；初始手工留一份合格骨架方便首次 `next` 之前查看。
+**注意**：`planctl handoff --write` 会以这个结构覆盖写入；它是**手动补救**命令，正常 Golden Loop 不需要额外调用，因为 `complete` 已自动刷新 handoff。初始手工留一份合格骨架只是为了首次 `next` 之前可读。
