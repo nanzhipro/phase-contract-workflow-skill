@@ -94,8 +94,8 @@
 3. 未写入 `plan/state.yaml` 的 phase，不视为完成。
 4. `complete` 会在一次调用内原子地刷新 `plan/state.yaml` 与 `plan/handoff.md`（tmp+rename），正常情况下**不需要**再额外跑 `ruby scripts/planctl handoff --write`；后者仅作为手工补救手段，当发现 handoff 与 state 失步或手动编辑过其中之一时再用。
 5. 不得在未运行 `complete` 的情况下，直接开始后续 phase。
-6. `complete` 会在写回 `state.yaml` / `handoff.md` 之后自动执行 `git add -A` → `git commit -F -`（地道英文 commit message：`chore(plan): complete <phase-id> — <title>`，带 `Phase-Id` / `Next-Focus` trailers） → `git push`（无 upstream 时回退到 `git push -u origin HEAD`）。在当前 phase 实施期间**不得**自行 `git commit` 或 `git push`，以免产生半成品提交或提交信息风格漂移；把里程碑记录权统一交给 `complete`。
-7. 允许设置 `PHASE_CONTRACT_SKIP_PUSH=1`（仅本地 commit）或 `PHASE_CONTRACT_SKIP_COMMIT=1`（跳过整条 git 收尾）仅用于离线 / 排障等特殊场景，默认不要使用；任何一次使用都应在对用户的汇报里明确说明原因。
+6. `complete` 会在写回 `state.yaml` / `handoff.md` 之后执行 `git add -A` → `git commit -F -`（地道英文 commit message：`chore(plan): complete <phase-id> — <title>`，带 `Phase-Id` / `Next-Focus` trailers） → `git push`（无 upstream 时回退到 `git push -u origin HEAD`；若仓库没有任何 remote，则只保留本地 commit 并继续，不得因此中止任务）。但在调用 `complete` 之前，AI 必须先根据当前 phase 产生的未跟踪文件自行推理哪些属于构建 / 编译 / 运行 / 测试中间产物，并在需要时更新根目录 `.gitignore`；判断标准以“是否可从源码或命令重新生成、是否属于真实交付物、是否被项目约定要求入库”为准，不能把 fixture、快照基线、lockfile、必须提交的生成代码/文档误判为垃圾。在当前 phase 实施期间**不得**自行 `git commit` 或 `git push`，以免产生半成品提交或提交信息风格漂移；把里程碑记录权统一交给 `complete`。
+7. 允许设置 `PHASE_CONTRACT_SKIP_PUSH=1`（仅本地 commit）或 `PHASE_CONTRACT_SKIP_COMMIT=1`（跳过整条 git 收尾）仅用于离线 / 排障等特殊场景，默认不要使用；若仓库天然没有 remote，也不要把它当成阻塞条件，应继续执行并在对用户的汇报里明确说明当前只落本地里程碑。若 AI 基于上述推理更新了 `.gitignore`，应将其视为正常基础设施变更，而不是越界编辑。
 8. 若 `complete` 的 commit 或 push 失败，`state.yaml` 仍会保持已完成状态（不回滚）；应当向用户报告 warning 原文并提示手动处置（鉴权、保护分支、pre-commit hook 等），而不是尝试手动 `git reset` 或伪造提交。
 9. 回退某个已完成 phase 时必须走 `ruby scripts/planctl revert <phase-id>`，不得手工 `git revert` / `git reset` 也不得手工改 `state.yaml`；script 会负责定位里程碑 commit、保护下游依赖、重写 state/handoff 并提交 ledger。
 

@@ -1,6 +1,6 @@
 ---
 name: phase-contract-workflow
-description: "Set up a Phase-Contract long-running workflow that drives an AI agent to work continuously for 5+ hours on a single project. Use when the user wants to plan a large migration, new product build, big refactor, long-form writing project, compliance remediation, or any multi-phase task that exceeds a single context window. Triggers: '让 AI 连续工作', '长任务规划', '分阶段执行', 'phase 规划', 'plan 规划', '多阶段迁移', '大型重构规划', 'long-running AI workflow', 'phase-contract', 'planctl', 'manifest + execution 双文档', '拆 phase', '规划压缩恢复', '给 AI 写 plan', '项目分阶段', '续跑规划', 'Aegis 式规划'. Scaffolds plan/manifest.yaml, plan/common.md, plan/phases/, plan/execution/, a planctl scheduler script, plus synchronized agent instruction files (.github/copilot-instructions.md for Copilot, CLAUDE.md for Claude Code, AGENTS.md for Codex) so phase state is externalized and AI work can survive context compression across all three agents."
+description: "Set up a Phase-Contract long-running workflow that drives an AI agent to work continuously for 5+ hours on a single project. Use when the user wants to plan a large migration, new product build, big refactor, long-form writing project, compliance remediation, or any multi-phase task that exceeds a single context window. Triggers: '让 AI 连续工作', '长任务规划', '分阶段执行', 'phase 规划', 'plan 规划', '多阶段迁移', '大型重构规划', 'long-running AI workflow', 'phase-contract', 'planctl', 'manifest + execution 双文档', '拆 phase', '规划压缩恢复', '给 AI 写 plan', '项目分阶段', '续跑规划', '合同链规划', '长任务续跑工作流'. Scaffolds plan/manifest.yaml, plan/common.md, plan/phases/, plan/execution/, a planctl scheduler script, plus synchronized agent instruction files (.github/copilot-instructions.md for Copilot, CLAUDE.md for Claude Code, AGENTS.md for Codex) so phase state is externalized and AI work can survive context compression across all three agents."
 argument-hint: "(optional) target project path and short project description"
 ---
 
@@ -72,7 +72,7 @@ argument-hint: "(optional) target project path and short project description"
 | P5  | 依赖强制校验   | `depends_on` + `--strict` 阻断跳步                                     |
 | P6  | 完成即写入     | `complete` 原子写回 `state.yaml` 与 `handoff.md`，缺一不进下一圈       |
 | P7  | 固定恢复协议   | 压缩后永远三步：manifest → handoff → next                              |
-| P8  | 里程碑外部化   | `complete` 自动 `git add/commit/push`，每个 phase 一次可回滚的远端记录 |
+| P8  | 里程碑外部化   | `complete` 自动 `git add/commit/push`；有 remote 时形成远端记录，无 remote 时保留本地可回滚里程碑 |
 
 ## Procedure
 
@@ -128,7 +128,7 @@ argument-hint: "(optional) target project path and short project description"
 
 ### Step 3: 安装 planctl
 
-把 [scripts/planctl.rb](./scripts/planctl.rb) 复制到目标项目的 `scripts/planctl`，加可执行位：`chmod +x scripts/planctl`。跑一次 `ruby scripts/planctl status` 自检，再跑 `ruby scripts/planctl doctor` 做一次完整体检（Ruby 版本、git 工作区、manifest 引用、state/handoff 一致性、三份 agent 指令 SHA256 比对）。
+把 [scripts/planctl.rb](./scripts/planctl.rb) 复制到目标项目的 `scripts/planctl`，加可执行位：`chmod +x scripts/planctl`。planctl **不内置固定的中间产物名单**；这部分交给 AI 在 phase 实施中结合未跟踪文件、构建/编译/运行/测试命令输出、路径语义和“是否可从源码重新生成”自行推理。凡被判断为临时输出的路径，AI 应在 `complete` 前把精确规则写入根目录 `.gitignore`，避免 `git add -A` 把它们带进里程碑提交；凡属于真实交付物、fixture、快照基线、lockfile、必须入库的生成代码/文档，则不得误忽略。跑一次 `ruby scripts/planctl status` 自检，再跑 `ruby scripts/planctl doctor` 做一次完整体检（Ruby 版本、git 工作区、manifest 引用、state/handoff 一致性、三份 agent 指令 SHA256 比对）。
 
 ### Step 4: 生成第一个 phase 的双层合同
 
@@ -200,15 +200,15 @@ ruby scripts/planctl doctor
 
 自动流程：
 
-1. `git add -A`：把 phase 产出的代码/文档、`plan/state.yaml`、`plan/handoff.md` 一并入栈。
+1. 在 `git add -A` 之前，AI 先根据当前 phase 产生的未跟踪/新生成文件自行推理哪些属于构建 / 编译 / 运行 / 测试临时输出，并在需要时更新根目录 `.gitignore`。随后 planctl 再执行 `git add -A`，把 phase 产出的代码/文档、`plan/state.yaml`、`plan/handoff.md`（以及必要时新更新的 `.gitignore`）一并入栈。
 2. 若暂存区为空（例如重复 `complete`）→ 跳过提交，给出 `Nothing to commit` 提示。
 3. 否则以地道英文提交，格式：
    - Subject：`chore(plan): complete <phase-id> — <phase title>`（自动截断到 100 字符内）
    - Body：用户传入的 `--summary`（缺省时为通用提示语）
    - Trailers：`Phase-Id: <id>`、`Next-Focus: <...>`（来自 `--next-focus`）、`Automated-By: scripts/planctl complete`
    - 通过 `git commit -F -`（stdin）写入，完全尊重仓库的 pre-commit / commit-msg hook，不使用 `--no-verify`。
-4. `git push`：优先用当前分支的 upstream；若无 upstream，则回退到 `git push -u origin HEAD`（没有 `origin` 时使用第一个可用 remote）。
-5. 失败不回滚：`state.yaml` 已经记录完成，commit/push 失败只输出 warning，让用户手动处置，不会把已完成的 phase 标回未完成。
+4. `git push`：若仓库已配置 remote，则优先用当前分支的 upstream；若无 upstream，则回退到 `git push -u origin HEAD`（没有 `origin` 时使用第一个可用 remote）。若仓库尚未配置任何 remote，则**跳过 push 并继续执行**，只打印 warning，phase 仍视为已完成。
+5. 失败不回滚：`state.yaml` 已经记录完成。无 remote、push 失败或 commit/push 其他异常都只输出 warning，让用户手动处置，不会把已完成的 phase 标回未完成，也不应因此中止后续 phase 规划与执行。
 
 环境变量（仅用于特殊场景，默认**不要**设置）：
 
@@ -263,7 +263,8 @@ To git@github.com:acme/widget.git
 - [ ] 三份 agent 指令**不得引入 agent-specific 段落**（任何"仅 Claude 看"、"仅 Copilot 看"的差异都会让 `planctl doctor` 的 SHA256 比对报错）；若确需差异，改为在 `plan/common.md` 里用"按 agent 区分"的小节承载
 - [ ] `scripts/planctl` 可执行，`ruby scripts/planctl status` 跑通
 - [ ] `planctl next --strict` 返回 phase-0 且 required_context 为三份
-- [ ] 目标项目已配置 `git remote`（`git remote` 非空）且当前分支可推送；若暂时无 remote，已在对用户的交付说明里提示后续 `complete` 将仅本地 commit
+- [ ] 首次 `complete` 前若仓库已出现未跟踪中间产物，AI 已基于可再生性、交付边界与项目约定自行判断并更新根目录 `.gitignore`，且不会把这些产物带进里程碑提交
+- [ ] 若目标项目已配置 `git remote`，其当前分支可推送；若暂时无 remote，已在对用户的交付说明里明确说明：后续 `complete` 将仅本地 commit、跳过 push，但**不阻塞**继续执行后续任务
 
 ## References
 

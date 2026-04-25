@@ -13,7 +13,7 @@ class PlanCtl
   SKIP_COMMIT_ENV = 'PHASE_CONTRACT_SKIP_COMMIT'
   ENFORCE_PATHS_ENV = 'PHASE_CONTRACT_ENFORCE_PATHS'
   GIT_GUARD_EXIT_CODE = 3
-  ALWAYS_ALLOWED_PATHS = %w[plan/state.yaml plan/handoff.md].freeze
+  ALWAYS_ALLOWED_PATHS = %w[plan/state.yaml plan/handoff.md .gitignore].freeze
   STATE_SCHEMA_VERSION = 1
 
   def initialize(repo_root)
@@ -53,7 +53,7 @@ class PlanCtl
     when 'json'
       puts JSON.pretty_generate(result)
     else
-      puts "Aegis plan state"
+      puts 'Phase-Contract plan state'
       puts "State file: #{result['state_file']}"
       puts "Handoff file: #{result['handoff_file']}"
       puts
@@ -344,7 +344,7 @@ class PlanCtl
   # critical problems found, and prints a structured report either way.
   # Checks:
   #   * Ruby runtime version (>= 2.7)
-  #   * git work tree + remote
+  #   * git work tree + optional remote
   #   * manifest phases -> plan_file / execution_file exist
   #   * state.yaml completed_phases -> each id exists in manifest
   #   * state.yaml <-> handoff.md coherence (both exist or both missing)
@@ -366,7 +366,7 @@ class PlanCtl
       puts 'Git work tree: ok'
       remotes = capture_git('remote').split("\n").reject(&:empty?)
       if remotes.empty?
-        warnings << 'No git remote configured; `complete` will commit locally only.'
+        warnings << 'No git remote configured; `complete` will commit locally, skip push, and continue.'
       else
         puts "Git remotes: #{remotes.join(', ')}"
       end
@@ -485,7 +485,8 @@ class PlanCtl
   # Automatically commit + push the current phase's work as a milestone.
   # Designed to run unattended:
   #   * `git add -A` stages every change under the work tree (phase output +
-  #     state.yaml + handoff.md).
+  #     state.yaml + handoff.md). If the AI updated `.gitignore` while
+  #     reasoning about transient artifacts, that change is staged too.
   #   * When nothing is staged we skip commit silently.
   #   * Commit message follows a Conventional-Commits-ish layout with
   #     idiomatic English wording, derived from phase id, title, summary and
@@ -539,7 +540,7 @@ class PlanCtl
   def push_milestone!(phase_id)
     remotes = capture_git('remote').split("\n").reject(&:empty?)
     if remotes.empty?
-      warn '[planctl] No git remote configured; milestone committed locally only.'
+      warn '[planctl] No git remote configured; milestone committed locally only, skipping push and continuing.'
       warn "[planctl] Add a remote and run `git push` manually, or set #{SKIP_PUSH_ENV}=1 to silence this warning."
       return
     end
@@ -747,7 +748,7 @@ class PlanCtl
     when 'paths'
       puts result['required_context'].join("\n")
     else
-      puts "Aegis phase context"
+      puts 'Phase-Contract phase context'
       puts "Target phase: #{result['phase_id']} #{result['title']}"
       puts "Resolver: #{result['resolver']}"
       puts "State file: #{result['state_file']}"
@@ -798,7 +799,7 @@ class PlanCtl
     when 'json'
       puts JSON.pretty_generate(snapshot)
     else
-      puts "Aegis execution handoff"
+      puts 'Phase-Contract execution handoff'
       puts "State file: #{snapshot['state_file']}"
       puts "Handoff file: #{snapshot['handoff_file']}"
       puts "Updated at: #{snapshot['updated_at'] || 'not recorded yet'}"
@@ -851,7 +852,7 @@ class PlanCtl
 
   def handoff_markdown(snapshot)
     lines = []
-    lines << '# Aegis Execution Handoff'
+    lines << '# Phase-Contract Execution Handoff'
     lines << ''
     lines << '本文件用于长流程执行时的压缩恢复。不要一次性重新加载全部 phase 文档；恢复时按本文档与 manifest 继续。'
     lines << ''

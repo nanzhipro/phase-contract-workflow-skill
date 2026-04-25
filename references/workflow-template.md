@@ -1,6 +1,6 @@
-# Aegis 执行流程说明
+# Phase-Contract 执行流程说明
 
-本文件说明 Aegis 是如何确保全部任务按既定顺序、完整执行的，以及在 AI 上下文压缩后如何继续执行。
+本文件说明 Phase-Contract Workflow 如何确保全部任务按既定顺序、完整执行，以及在 AI 上下文压缩后如何继续执行。
 
 ## 环境前提
 
@@ -180,21 +180,22 @@ ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<ne
 - completion log 记录摘要和下一步焦点
 - 下一次 `next` 会进入后续 phase
 
-紧接着 `complete` 还会自动完成**里程碑提交与推送**（见下一节）：`git add -A` → `git commit -F -` → `git push`，把本 phase 的所有改动（代码、文档、`state.yaml`、`handoff.md`）固化为一次可回溯、可回退的远端记录。在此之前**不要**自行 `git commit` / `git push`。
+紧接着 `complete` 还会自动完成**里程碑提交与推送**（见下一节）：AI 需要先根据当前 phase 产生的未跟踪文件，推理哪些属于构建 / 编译 / 运行 / 测试中间产物，并在需要时把精确规则写入根目录 `.gitignore`；随后再执行 `git add -A` → `git commit -F -` → `git push`，把本 phase 的所有改动（代码、文档、`state.yaml`、`handoff.md`，以及必要时新更新的 `.gitignore`）固化为一次可回溯、可回退的里程碑记录；若仓库没有 remote，则保留为本地里程碑并继续流程。在此之前**不要**自行 `git commit` / `git push`。
 
 ## 里程碑提交与推送（`complete` 自动）
 
 每次 `complete` 成功写回 `state.yaml` / `handoff.md` 之后，`scripts/planctl` 会按下列顺序自动执行 git 收尾，用来给每个 phase 留下一次地道英文、可审计、可回退的里程碑记录：
 
-1. `git add -A`：把 phase 产出与 plan 写回一起入栈。
-2. 若暂存区为空 → 打印 `Nothing to commit`，跳过提交（例如重复 `complete`）。
-3. 否则以如下格式 `git commit -F -`（stdin）：
+1. `git add -A` 之前先做 `.gitignore` 卫生：AI 结合未跟踪文件、命令输出、路径语义和可再生性，判断哪些是构建 / 编译 / 运行 / 测试中间产物，并把精确规则写入根目录 `.gitignore`。
+2. 然后执行 `git add -A`：把 phase 产出与 plan 写回一起入栈。
+3. 若暂存区为空 → 打印 `Nothing to commit`，跳过提交（例如重复 `complete`）。
+4. 否则以如下格式 `git commit -F -`（stdin）：
    - Subject：`chore(plan): complete <phase-id> — <phase title>`（自动截断到 100 字符内）
    - Body：用户传入的 `--summary`（缺省时为通用提示语）
    - Trailers：`Phase-Id: <id>`、`Next-Focus: <...>`、`Automated-By: scripts/planctl complete`
    - 保留 pre-commit / commit-msg hook，不使用 `--no-verify`。
-4. `git push`：优先推送到当前分支的 upstream；若无 upstream，则回退到 `git push -u origin HEAD`（无 `origin` 时使用第一个可用 remote）。
-5. 失败语义：commit 或 push 失败只打印 warning，**不会**回滚 `state.yaml`；由操作者手动处置（鉴权、保护分支、hook 失败等）。
+5. `git push`：若仓库已配置 remote，则优先推送到当前分支的 upstream；若无 upstream，则回退到 `git push -u origin HEAD`（无 `origin` 时使用第一个可用 remote）。若仓库没有任何 remote，则脚本只打印 warning、跳过 push，并继续后续流程。
+6. 失败语义：commit 或 push 失败只打印 warning，**不会**回滚 `state.yaml`；无 remote 也属于 warning-only 的降级场景，而不是阻塞条件。后续由操作者手动处置（鉴权、补 remote、保护分支、hook 失败等）。
 
 环境变量（仅用于特殊场景，默认不要设置）：
 

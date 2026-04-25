@@ -109,7 +109,7 @@ next --strict  →  读 3 份上下文  →  实施（守 execution 边界）
 | P5 | 依赖强制校验 | `depends_on` + `--strict` 阻断跳步 |
 | P6 | 完成即写入 | `complete` 是唯一写回入口 |
 | P7 | 固定恢复协议 | 压缩后永远三步：manifest → handoff → next |
-| P8 | 里程碑外部化到 git 远端 | `complete` 自动 commit + push，留可回滚记录 |
+| P8 | 里程碑外部化 | `complete` 自动 commit + push；有 remote 时同步到远端，无 remote 时保留本地可回滚记录 |
 
 完整论述：[references/methodology.md](./methodology.md)。
 
