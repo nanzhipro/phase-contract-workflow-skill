@@ -4,21 +4,32 @@
 
 ### Added
 
+- `planctl advance [--format prompt|json] [--strict]` — autonomous
+  continuation state machine. It emits `ACTION: implement`,
+  `ACTION: promote_placeholder`, `ACTION: finalize`, or `ACTION: stop` so
+  phase boundaries stop behaving like user confirmation points. In
+  `--strict`, placeholder contracts remain an internal action with exit 0;
+  only real blockers such as missing dependencies or missing context exit 2.
+- `planctl complete ... --continue` — after state/handoff writeback and
+  milestone handling, immediately chains into `advance --strict`. Projects
+  can also set `execution_rule.continuation.mode: autonomous` so `complete`
+  auto-advances even if `--continue` is omitted.
+
 - `planctl finalize [--format text|json]` — explicit whole-plan wrap-up.
   Refuses to run (exit 2) until every manifest phase is in
   `state.yaml.completed_phases`; otherwise aggregates project metadata,
   per-phase ledger (with `Phase-Id:` milestone commit lookup), repository
   state (branch, upstream, ahead/behind, working tree, remotes, last
   commit), doctor-style health checks, and a tailored "human next steps"
-  checklist into a single dashboard. `complete`, `next`, and `resume` now
+  checklist into a single dashboard. `complete`, `advance`, `next`, and `resume` now
   point at `finalize` as the mandatory final step instead of stopping at
   "All phases are completed". Agent instruction template gains §12
   Finalization rule binding the AI to run `finalize`, layer deep review
   on top, and surface decision points (release tag, archiving `plan/`,
   long-term maintenance) back to the human without auto-executing them.
 
-- Placeholder-contract enforcement for the current phase. `planctl next`,
-  `resolve`, `status`, `resume`, and `doctor` now treat a phase as not
+- Placeholder-contract enforcement for the current phase. `planctl advance`,
+  `next`, `resolve`, `status`, `resume`, and `doctor` now treat a phase as not
   ready when its `plan_file` / `execution_file` still carry
   `PHASE_CONTRACT_PLACEHOLDER` (or legacy placeholder phrasing in the file
   header). In `--strict`, this exits 2 and tells the agent to upgrade both
@@ -32,8 +43,8 @@
   that still has completed downstream dependencies.
 - `planctl resume [--strict]` — one-shot cold-start command for
   context-compressed or fresh sessions. Prints the project header,
-  handoff snapshot, and a full `next` resolution (required_context,
-  read_order, prompt) without requiring the agent to reconstruct the
+  handoff snapshot, and the same autonomous `advance` ACTION used by the
+  normal Golden Loop, without requiring the agent to reconstruct the
   reading order by hand.
 - `planctl doctor` — repository health check. Validates Ruby version,
   `git` work-tree / remotes, manifest `plan_file` / `execution_file`
@@ -54,7 +65,7 @@
   script understands and hints the user to upgrade `planctl` first.
   Missing `version:` is tolerated so legacy state files keep working.
 - `complete` now prints a `Next phase: <id> (<title>). Run: ruby
-  scripts/planctl next --format prompt --strict` hint at the end of a
+  scripts/planctl advance --strict` hint at the end of a
   successful run (or `All phases are completed. No remaining work.`
   when none remain), so a fresh session does not have to re-derive the
   next step from the manifest.
@@ -78,14 +89,20 @@
 
 ### Documentation
 
+- `README.md`, `README.zh-CN.md`, `SKILL.md`,
+  `references/templates.md`, `references/workflow-template.md`,
+  `references/methodology.md`, `references/glossary.md`, and
+  `references/agent-instructions-template.md` now describe `advance` as the
+  default Golden Loop entry and `complete --continue` as the normal phase
+  completion command.
 - Introduced a formal placeholder-contract protocol in
   `references/phase-templates.md`, including the machine-readable
   `PHASE_CONTRACT_PLACEHOLDER` sentinel, paired future-phase stubs, and the
   rule that both contracts must be promoted together before implementation.
 - `SKILL.md`, `references/workflow-template.md`, and
   `references/agent-instructions-template.md` now define the same Golden
-  Loop boundary behavior: after `complete`, immediately rerun
-  `next --strict`; if the new current phase is placeholder-only, upgrade
+  Loop boundary behavior: after `complete --continue`, follow the
+  `advance` ACTION; if the new current phase is placeholder-only, upgrade
   both contracts first instead of asking the user for confirmation.
 - `references/methodology.md`, `README.md`, and `README.zh-CN.md` now say
   the same thing about phase boundaries and clarify that
@@ -101,7 +118,7 @@
   `execution_rule.enforce_allowed_paths:` strict-mode switch.
 - `references/workflow-template.md` now includes a "如何回退一个 Phase"
   section covering `--mode revert` vs `--mode reset` and the expected
-  follow-up `planctl next --strict`.
+  follow-up `planctl advance --strict`.
 - `references/agent-instructions-template.md` §八 adds rule #10 requiring
   all phase rollbacks to go through `planctl revert`, never manual
   `git revert` / `git reset` / manual `state.yaml` edits; and clarifies

@@ -26,12 +26,28 @@ execution_rule:
     - CLAUDE.md                         # Claude Code
     - AGENTS.md                         # Codex / 通用 Agent
   continuous_execution:
-    next_command: ruby scripts/planctl next --format prompt --strict
+    next_command: ruby scripts/planctl advance --strict
     completion_command: >-
-      ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>"
-    # complete 之后必须立刻再次运行 next --strict。
+      ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue
+    # complete --continue 会在写回 state/handoff 与里程碑提交后立即解析下一内部动作。
     # 若新 current phase 的 plan/execution 仍带 PHASE_CONTRACT_PLACEHOLDER，
-    # 先把两份文件升级成正式合同，再开始实现；不要把这一步当成用户确认点。
+    # planctl advance 会返回 ACTION: promote_placeholder；先把两份文件升级成正式合同，
+    # 再重跑 advance --strict。不要把这一步当成用户确认点。
+  continuation:
+    mode: autonomous
+    stop_only_on:
+      - dependency_missing
+      - missing_context
+      - required_gate_failed
+      - git_conflict
+      - destructive_operation_required
+      - all_phases_completed
+    non_stop_actions:
+      - phase_completed
+      - next_phase_ready
+      - placeholder_contract_promotion
+      - optional_check_failed
+      - no_remote_configured
   enforcement:
     dependency_check: true
     stop_on_missing_context: true
@@ -86,8 +102,8 @@ phases:
   # - plan/phases/phase-X-<slug>.md
   # - plan/execution/phase-X-<slug>.md
   # 两份文件都在前 40 行内保留 `PHASE_CONTRACT_PLACEHOLDER` 哨兵；
-  # 当该 phase 成为 current phase 时，`next --strict` / `resolve --strict` 会 exit 2，
-  # 逼 agent 先补正式合同，再进入实现。
+  # 当该 phase 成为 current phase 时，`advance --strict` 会返回 ACTION: promote_placeholder，
+  # 逼 agent 先补正式合同，再进入实现；这不是用户确认点。
   # …后续 phase 按同样结构追加
 ```
 
@@ -211,7 +227,7 @@ updated_at: null
 
 1. `plan/manifest.yaml`
 2. `plan/handoff.md`
-3. `next.phase.required_context`
+3. `advance.phase.required_context`
 
 ## 压缩控制规则
 
@@ -221,9 +237,9 @@ updated_at: null
 
 ## 连续执行命令
 
-- next: `ruby scripts/planctl next --format prompt --strict`
-- complete: `ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>"`
+- next: `ruby scripts/planctl advance --strict`
+- complete: `ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue`
 - handoff-repair (manual recovery only): `ruby scripts/planctl handoff --write`
 ```
 
-**注意**：`planctl handoff --write` 会以这个结构覆盖写入；它是**手动补救**命令，正常 Golden Loop 不需要额外调用，因为 `complete` 已自动刷新 handoff。初始手工留一份合格骨架只是为了首次 `next` 之前可读。
+**注意**：`planctl handoff --write` 会以这个结构覆盖写入；它是**手动补救**命令，正常 Golden Loop 不需要额外调用，因为 `complete` 已自动刷新 handoff。初始手工留一份合格骨架只是为了首次 `advance` 之前可读。

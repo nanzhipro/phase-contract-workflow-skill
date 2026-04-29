@@ -136,7 +136,7 @@ argument-hint: "(optional) target project path and short project description"
 - 为 `phase-0`（和用户明确想立刻启动的 phase）生成**正式**的 `phases/*` 和 `execution/*`
 - 为其余 future phase 生成**成对占位合同**，使用 [references/phase-templates.md](./references/phase-templates.md) 里的 `PHASE_CONTRACT_PLACEHOLDER` 模板
 
-不要一次把所有 future phase 都写成正式合同——那会破坏"只装 3 份文档"的不变量，也会被后续认知更新推翻；但也不要留空文件，因为 `planctl doctor` 需要验证 manifest 引用存在，而 `next --strict` / `resolve --strict` 需要在该 phase 轮到当前时识别它仍是占位合同并 exit 2。
+不要一次把所有 future phase 都写成正式合同——那会破坏"只装 3 份文档"的不变量，也会被后续认知更新推翻；但也不要留空文件，因为 `planctl doctor` 需要验证 manifest 引用存在，而 `advance --strict` 需要在该 phase 轮到当前时识别它仍是占位合同并返回 `ACTION: promote_placeholder`。
 
 模板见 [references/phase-templates.md](./references/phase-templates.md)。
 
@@ -151,12 +151,12 @@ argument-hint: "(optional) target project path and short project description"
 在目标项目根目录运行：
 
 ```bash
-ruby scripts/planctl next --format prompt --strict
+ruby scripts/planctl advance --strict
 ```
 
 验收三条：
 
-1. 命令以 0 退出码返回当前应执行的 phase 和其 `required_context`
+1. 命令以 0 退出码返回 `ACTION: implement`、当前应执行的 phase 和其 `required_context`
 2. `required_context` 恰好是三份：`common.md` + `phases/phase-0-*.md` + `execution/phase-0-*.md`
 3. `plan/handoff.md` 已包含压缩恢复三步和下一 phase 指引
 
@@ -165,20 +165,20 @@ ruby scripts/planctl next --format prompt --strict
 告诉用户后续每一圈的循环命令（Golden Loop）：
 
 ```bash
-# 查看下一步
-ruby scripts/planctl next --format prompt --strict
+# 查看下一步（连续执行状态机）
+ruby scripts/planctl advance --strict
 
 # 实施该 phase 后标记完成（自动刷新 handoff、并 git add -A / commit / push 本 phase 的里程碑）
-ruby scripts/planctl complete <phase-id> --summary "<做了什么>" --next-focus "<下一个 phase 要关注什么>"
+ruby scripts/planctl complete <phase-id> --summary "<做了什么>" --next-focus "<下一个 phase 要关注什么>" --continue
 
-# complete 后立刻再次运行 next --strict；若当前 phase 仍是占位合同，先补正式合同，再开始实现
-# 当 next 返回 "All phases are completed" 时，跑一次 finalize 收尾，不要直接收工
+# complete --continue 会立刻运行 advance；若 ACTION: promote_placeholder，先补正式合同，再重跑 advance
+# 当 advance 返回 ACTION: finalize 时，跑一次 finalize 收尾，不要直接收工
 ruby scripts/planctl finalize
 ```
 
 > 注：`complete` 已自动 `write_state` → `write_handoff_file`（均为 tmp+rename 原子写入）。`ruby scripts/planctl handoff --write` 仅作为**手动补救**：比如你手改了 `state.yaml` 但忘了别的联动刷新，或 `complete` 后 `handoff.md` 被意外编辑需要重放。正常循环不需要多这一步。
 
-> 若 `next --strict` / `resolve --strict` 只因当前 phase 的 `phases/*.md` / `execution/*.md` 仍带 `PHASE_CONTRACT_PLACEHOLDER` 而 exit 2，这不是用户确认点，而是 Golden Loop 内部待办：先把两份文件升级成正式合同，再重跑同一条 strict 命令。
+> 若 `advance --strict` 返回 `ACTION: promote_placeholder`，这不是用户确认点，而是 Golden Loop 内部待办：先把两份文件升级成正式合同，再重跑同一条 strict 命令。
 
 **压缩恢复 / 冷启动**：新会话开场只需一条命令，替代手动读三份文件：
 
@@ -186,7 +186,7 @@ ruby scripts/planctl finalize
 ruby scripts/planctl resume --strict
 ```
 
-输出包含项目概览、handoff 快照和下一 phase 的完整 resolve 结果，足以让任意 agent 在单次读取中恢复全部上下文。
+输出包含项目概览、handoff 快照和下一步 `ACTION`，足以让任意 agent 在单次读取中恢复全部上下文并继续 Golden Loop。
 
 **仓库体检**：怀疑三份 agent 指令失步、manifest 引用断裂或 state 与 handoff 不一致时，运行：
 
@@ -198,11 +198,11 @@ ruby scripts/planctl doctor
 
 并提醒三件事：
 
-- 压缩或新会话恢复**永远且仅**三步：读 manifest → 读 handoff → 跑 `next --strict`（或一步 `resume --strict`）
+- 压缩或新会话恢复**永远且仅**三步：读 manifest → 读 handoff → 跑 `advance --strict`（或一步 `resume --strict`）
 - `complete` 是写回 state + handoff + git 里程碑的原子入口；**不要**再对其补一次 `handoff --write`，未跑 `complete` 的 phase 则直接不视为完成
-- `complete` 之后必须立刻再次解析下一 phase；若 strict 因占位合同失败，先升级该 phase 的两份合同，不要停下来问用户是否继续
+- `complete --continue` 之后必须立刻服从 `advance` 的下一 `ACTION`；若返回 `promote_placeholder`，先升级该 phase 的两份合同，不要停下来问用户是否继续
 - 未写入 `state.yaml` 的 phase 不视为完成，不管 AI 自己说做得多好
-- 当 `next` / `complete` 输出 “All phases are completed”，下一动作不是直接对人类宣告项目结束，而是跑 `ruby scripts/planctl finalize`，把仪表盘和决策权按 Step 8 交还人类
+- 当 `advance` / `complete --continue` 输出 `ACTION: finalize` 或 “All phases are completed”，下一动作不是直接对人类宣告项目结束，而是跑 `ruby scripts/planctl finalize`，把仪表盘和决策权按 Step 8 交还人类
 
 ### Step 7: 里程碑提交与推送（`complete` 自动执行）
 
@@ -245,7 +245,7 @@ To git@github.com:acme/widget.git
 触发条件（满足任一即进入收尾）：
 
 - `complete` 的输出里出现 `All phases are completed. No remaining work.`
-- `next` 或 `resume` 的输出里出现 `All phases are completed.`
+- `advance` 或 `complete --continue` 的输出里出现 `ACTION: finalize`
 
 AI 必须立刻执行的动作（连续执行，不需要用户确认）：
 
@@ -287,7 +287,7 @@ ruby scripts/planctl finalize
 
 **用户说"phase 文档 AI 帮我全写了吧"**：只把 phase-0（和准备立刻启动的 phase）写成正式合同；future phase 先保留占位合同。manifest 和 common 必须由用户主导，否则 AI 拟合会把全局带偏。
 
-**`next --strict` 指向的新 phase 仍是占位合同**：这不是 blocker，也不是用户确认点。先把该 phase 的 `phases/*.md` 和 `execution/*.md` 同步升级成正式合同，再 rerun 同一条 strict 命令；strict 通过前不得开始实现。
+**`advance --strict` 指向的新 phase 仍是占位合同**：这不是 blocker，也不是用户确认点。`advance` 会返回 `ACTION: promote_placeholder`；先把该 phase 的 `phases/*.md` 和 `execution/*.md` 同步升级成正式合同，再 rerun 同一条 strict 命令；返回 `ACTION: implement` 前不得开始实现。
 
 **用户已有 phase 结构但没有 planctl 体系**：跳过 Step 1.3–1.4，仅生成基础设施（manifest、common、workflow、planctl、三份 agent 指令），把已有 phase 文档纳入 manifest。
 
@@ -295,7 +295,7 @@ ruby scripts/planctl finalize
 
 **AI 在 phase 间越界改文件**：在 `manifest.yaml` 的 `execution_rule` 下加 `enforce_allowed_paths: true`，并给每个 phase 填 `allowed_paths:` glob 白名单（见 [references/templates.md](./references/templates.md)）。开启后 `complete` 会在写回 state 之前把 `git diff --cached` 与白名单比对，越界路径直接 abort 且**不更新 state.yaml**，phase 保持未完成。临时关掉走 `enforce_allowed_paths: false`（仅警告）或 `PHASE_CONTRACT_ENFORCE_PATHS=1` 覆盖。
 
-**新会话冷启动 / 上下文压缩后续跑**：运行 `ruby scripts/planctl resume --strict`。一次性打印项目概览、handoff 快照和下一 phase 的完整 resolve 结果，等价于手动读 `manifest` + `handoff` + 跑 `next`。
+**新会话冷启动 / 上下文压缩后续跑**：运行 `ruby scripts/planctl resume --strict` 或 `ruby scripts/planctl advance --strict`。一次性打印项目概览、handoff 快照和下一 phase 的完整结果，等价于手动读 `manifest` + `handoff` + 跑状态机。
 
 **怀疑 state/agent 指令失同步**：运行 `ruby scripts/planctl doctor`。按 SHA256 对比 `.github/copilot-instructions.md`、`CLAUDE.md`、`AGENTS.md` 三份指令是否字节一致，校验 manifest 引用、state 与 handoff 的一致性；发现问题以 exit 2 退出。
 
@@ -316,8 +316,8 @@ ruby scripts/planctl finalize
 - [ ] `.github/copilot-instructions.md`、`CLAUDE.md`、`AGENTS.md` 三份内容完全一致，均包含 10 条硬约束（见 [references/methodology.md §9](./references/methodology.md)）
 - [ ] 三份 agent 指令**不得引入 agent-specific 段落**（任何"仅 Claude 看"、"仅 Copilot 看"的差异都会让 `planctl doctor` 的 SHA256 比对报错）；若确需差异，改为在 `plan/common.md` 里用"按 agent 区分"的小节承载
 - [ ] `scripts/planctl` 可执行，`ruby scripts/planctl status` 跑通
-- [ ] `planctl next --strict` 返回 phase-0 且 required_context 为三份
-- [ ] 当某个 future phase 仍是占位合同且它变成 current phase 时，`planctl next --strict` / `resolve --strict` 会以 exit 2 拒绝开始实现，直到两份合同被升级
+- [ ] `planctl advance --strict` 返回 `ACTION: implement`、phase-0 且 required_context 为三份
+- [ ] 当某个 future phase 仍是占位合同且它变成 current phase 时，`planctl advance --strict` 会返回 `ACTION: promote_placeholder`，直到两份合同被升级
 - [ ] 首次 `complete` 前若仓库已出现未跟踪中间产物，AI 已基于可再生性、交付边界与项目约定自行判断并更新根目录 `.gitignore`，且不会把这些产物带进里程碑提交
 - [ ] 若目标项目已配置 `git remote`，其当前分支可推送；若暂时无 remote，已在对用户的交付说明里明确说明：后续 `complete` 将仅本地 commit、跳过 push，但**不阻塞**继续执行后续任务
 - [ ] `scripts/planctl finalize` 在 phase 尚未全部完成时以 exit 2 拒绝运行；当且仅当 `state.yaml` 包含全部 manifest phase 时才打印仪表盘

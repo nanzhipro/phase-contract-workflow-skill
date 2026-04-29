@@ -4,7 +4,7 @@
 
 ## 环境前提
 
-本仓库必须是 git 工作区（`git rev-parse --is-inside-work-tree` 返回 `true`）。`scripts/planctl` 的 `next` / `resolve` / `complete` / `handoff` 在检测到非 git 工作区时会以 **exit code 3** 拒绝运行（`status` 只打警告不拦截，保证诊断可用）。仅当确需不使用 git 时，可通过 `PHASE_CONTRACT_ALLOW_NON_GIT=1` 环境变量显式绕过，且必须在 `plan/common.md` 中记录偏离风险与补偿方案。
+本仓库必须是 git 工作区（`git rev-parse --is-inside-work-tree` 返回 `true`）。`scripts/planctl` 的 `advance` / `next` / `resolve` / `complete` / `handoff` 在检测到非 git 工作区时会以 **exit code 3** 拒绝运行（`status` 只打警告不拦截，保证诊断可用）。仅当确需不使用 git 时，可通过 `PHASE_CONTRACT_ALLOW_NON_GIT=1` 环境变量显式绕过，且必须在 `plan/common.md` 中记录偏离风险与补偿方案。
 
 ## 目标
 
@@ -65,6 +65,7 @@
 
 - `resolve`: 解析指定 phase 的上下文和依赖
 - `next`: 找到当前应该执行的下一个 phase
+- `advance`: 输出连续执行状态机的下一动作（implement / promote_placeholder / finalize / stop）
 - `status`: 展示已完成、可执行、被阻塞的 phase
 - `complete`: 在 phase 真完成后把状态写回 `plan/state.yaml`
 - `handoff`: 生成或刷新 `plan/handoff.md`
@@ -107,8 +108,8 @@
 顺序不是靠人工记忆，而是靠以下机制共同保证：
 
 1. `plan/manifest.yaml` 明确写出 phase 的顺序和 `depends_on`
-2. `planctl next` 只返回按 manifest 顺序找到的第一个未完成 phase
-3. `planctl resolve --strict` 和 `planctl next --strict` 会校验依赖是否满足
+2. `planctl advance` 只围绕按 manifest 顺序找到的第一个未完成 phase 输出下一动作
+3. `planctl resolve --strict`、`planctl next --strict` 和 `planctl advance --strict` 会校验依赖是否满足
 4. 未完成前置 phase 时，后续 phase 会被标记为 blocked，不允许继续执行
 
 因此，这套流程天然防止跳 phase 和乱序执行。
@@ -134,8 +135,8 @@
 
 1. 读取 `plan/manifest.yaml`
 2. 读取 `plan/handoff.md`
-3. 运行 `ruby scripts/planctl next --format prompt --strict`
-4. 按输出结果读取当前 phase 的 `required_context`
+3. 运行 `ruby scripts/planctl advance --strict`
+4. 当输出 `ACTION: implement` 时，按输出结果读取当前 phase 的 `required_context`
 5. 开始实施当前 phase
 
 开始时不要一次性加载全部 `plan/phases/` 和 `plan/execution/`，只加载当前 phase 所需上下文。
@@ -144,21 +145,21 @@
 
 在长流程里，每个 phase 都遵循同一个循环：
 
-1. 运行 `next`
+1. 运行 `advance --strict`
 2. 读取当前 phase 的 `required_context`
 3. 按当前 execution 文档实施
-4. phase 真完成后运行 `complete`
-5. 立刻再次运行 `next`
-6. 若新 current phase 仍是占位合同，先把该 phase 的 `phases/*.md` 和 `execution/*.md` 升级成正式合同，再重跑 `next` / `resolve --strict`
+4. phase 真完成后运行 `complete --continue`
+5. 按 `advance` 返回的下一 `ACTION` 继续
+6. 若返回 `ACTION: promote_placeholder`，先把该 phase 的 `phases/*.md` 和 `execution/*.md` 升级成正式合同，再重跑 `advance --strict`
 
 对应命令如下：
 
 ```bash
-ruby scripts/planctl next --format prompt --strict
-ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>"
+ruby scripts/planctl advance --strict
+ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue
 ```
 
-这样每完成一个 phase，状态、摘要和恢复锚点都会同步更新；后续 phase 若尚未正式规划，会因为占位合同而被 strict 主动拦下，迫使 AI 先补正式合同，而不是误把 phase 边界当成用户确认点。
+这样每完成一个 phase，状态、摘要和恢复锚点都会同步更新；后续 phase 若尚未正式规划，`advance` 会返回 `ACTION: promote_placeholder`，迫使 AI 先补正式合同，而不是误把 phase 边界当成用户确认点。
 
 ## 如何结束单个 Phase
 
@@ -171,25 +172,25 @@ ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<ne
 然后运行：
 
 ```bash
-ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>"
+ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue
 ```
 
 此时会发生三件事：
 
 - `plan/state.yaml` 记录该 phase 已完成
 - completion log 记录摘要和下一步焦点
-- 下一次 `next` 会进入后续 phase
+- `--continue` 会立即运行 `advance`，输出后续内部动作
 
 紧接着 `complete` 还会自动完成**里程碑提交与推送**（见下一节）：AI 需要先根据当前 phase 产生的未跟踪文件，推理哪些属于构建 / 编译 / 运行 / 测试中间产物，并在需要时把精确规则写入根目录 `.gitignore`；随后再执行 `git add -A` → `git commit -F -` → `git push`，把本 phase 的所有改动（代码、文档、`state.yaml`、`handoff.md`，以及必要时新更新的 `.gitignore`）固化为一次可回溯、可回退的里程碑记录；若仓库没有 remote，则保留为本地里程碑并继续流程。在此之前**不要**自行 `git commit` / `git push`。
 
 ## 如何进入下一 Phase
 
-`complete` 成功后，下一步不是停下来问用户“是否继续”，而是立刻做这组内部动作：
+`complete --continue` 成功后，下一步不是停下来问用户“是否继续”，而是立刻做这组内部动作：
 
-1. 再次运行 `ruby scripts/planctl next --format prompt --strict`
-2. 如果新 current phase 的 `phases/*.md` / `execution/*.md` 仍带 `PHASE_CONTRACT_PLACEHOLDER`，先把两份文件升级成正式合同
-3. 对同一个 phase 再跑一次 `next --strict` 或 `resolve --strict`
-4. strict 通过后直接开始实施
+1. 自动运行 `ruby scripts/planctl advance --strict`
+2. 如果输出 `ACTION: implement`，读取 required_context 并直接开始实施
+3. 如果输出 `ACTION: promote_placeholder`，先把两份文件升级成正式合同，再重跑 `advance --strict`
+4. 如果输出 `ACTION: stop`，报告真实 blocker；如果输出 `ACTION: finalize`，进入整体收尾
 
 这一步属于 Golden Loop 内部步骤，不是用户确认点。
 
@@ -232,23 +233,23 @@ ruby scripts/planctl revert <phase-id> [--mode revert|reset] [--summary "<reason
 3. 从 `completed_phases` 中剔除该 phase，在 `completion_log` 追加 `reverted_at` 条目。
 4. 重写 `plan/handoff.md`，以 `chore(plan): revert <phase-id>` 提交 ledger 并推送（`revert` 模式）。
 
-回退后再跑一次 `planctl next --strict`，该 phase 会重新进入队列。
+回退后再跑一次 `planctl advance --strict`，该 phase 会重新进入队列。
 
 ## 如何结束全部计划
 
 当全部 phase 都完成后，先运行：
 
 ```bash
-ruby scripts/planctl next --format prompt --strict
+ruby scripts/planctl advance --strict
 ```
 
-如果没有剩余 phase，脚本会返回全部完成的结果，并提示进入整体收尾。此时：
+如果没有剩余 phase，脚本会返回 `ACTION: finalize`，并提示进入整体收尾。此时：
 
 - `plan/state.yaml` 中应包含全部 phase
 - `plan/handoff.md` 中不再有下一 phase
 - `planctl status` 会显示没有 remaining queue
 
-但**到此还没有真正结束**。Phase-Contract 把“全部 phase 完成”和“项目可交付收尾”刻意分成两步：前者由 `complete`/`next` 表示，后者必须由 AI 主动跑一次 `finalize`，并把仪表盘和决策权交回给人类。
+但**到此还没有真正结束**。Phase-Contract 把“全部 phase 完成”和“项目可交付收尾”刻意分成两步：前者由 `complete --continue` / `advance` 表示，后者必须由 AI 主动跑一次 `finalize`，并把仪表盘和决策权交回给人类。
 
 ```bash
 ruby scripts/planctl finalize
@@ -274,16 +275,16 @@ AI 会遇到上下文窗口限制，所以恢复流程不能依赖聊天记忆�
 
 1. 读取 `plan/manifest.yaml`
 2. 读取 `plan/handoff.md`
-3. 运行 `ruby scripts/planctl next --format prompt --strict`
-4. 若 strict 只因当前 phase 仍是占位合同而失败，先把该 phase 的两份合同升级成正式合同，再重跑同一条 strict 命令
-5. 按输出结果读取当前 phase 的 `required_context`
+3. 运行 `ruby scripts/planctl advance --strict`
+4. 若返回 `ACTION: promote_placeholder`，先把该 phase 的两份合同升级成正式合同，再重跑同一条 strict 命令
+5. 若返回 `ACTION: implement`，按输出结果读取当前 phase 的 `required_context`
 6. 继续执行
 
 恢复时不要重新全量加载全部 phase 文档；只读取：
 
 - `plan/manifest.yaml`
 - `plan/handoff.md`
-- 当前 `next` 返回的 `required_context`
+- 当前 `advance` 返回的 `required_context`
 
 ## 压缩控制原则
 
@@ -311,13 +312,13 @@ ruby scripts/planctl resolve <phase-id> --format prompt --strict
 连续执行下一个 phase：
 
 ```bash
-ruby scripts/planctl next --format prompt --strict
+ruby scripts/planctl advance --strict
 ```
 
 标记当前 phase 完成：
 
 ```bash
-ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>"
+ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue
 ```
 
 手动重放交接文件（仅补救）：

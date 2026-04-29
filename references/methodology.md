@@ -182,14 +182,15 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
 |------|------|------|------|
 | `resolve <phase-id>` | phase id | 该 phase 的 required_context + 依赖检查结果 | 单 phase 启动 |
 | `next` | — | 下一个未完成且依赖满足的 phase | 连续推进 |
+| `advance` | — | 下一内部动作（implement / promote_placeholder / finalize / stop） | 自动续跑状态机 |
 | `status` | — | 已完成 / 可执行 / 被阻塞三组清单 | 总览 |
-| `complete <phase-id>` | summary + next_focus | 写入 state.yaml + 刷新 handoff.md | 标记完成 |
+| `complete <phase-id> --continue` | summary + next_focus | 写入 state.yaml + 刷新 handoff.md + 继续 advance | 标记完成并自动续跑 |
 | `handoff --write` | — | 手动重放 handoff.md | 手动补救，不在常规 loop 里 |
 
 **三个硬要求**：
 
-1. `resolve` / `next` 必须支持 `--strict`：依赖不满足时以非零退出码终止，禁止返回"可以开始"的假信号
-2. `resolve` / `next` 在当前 phase 的 `phases/*.md` / `execution/*.md` 仍带 `PHASE_CONTRACT_PLACEHOLDER` 时，也必须以非零退出码终止，逼 AI 先补正式合同
+1. `resolve` / `next` / `advance` 必须支持 `--strict`：依赖不满足时以非零退出码终止，禁止返回"可以开始"的假信号
+2. `advance` 在当前 phase 的 `phases/*.md` / `execution/*.md` 仍带 `PHASE_CONTRACT_PLACEHOLDER` 时，必须返回 `ACTION: promote_placeholder` 且保持 0 退出码，逼 AI 先补正式合同，但不把 phase 边界变成用户确认点
 3. `complete` 必须在写入前重新校验 `depends_on`，不信任调用方传入的 phase id
 
 ---
@@ -199,7 +200,7 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
 ```
 ┌─ [0] 开局 ─────────────────────────────────────────────┐
 │  读 manifest + handoff                                 │
-│  跑  planctl next --strict                             │
+│  跑  planctl advance --strict                          │
 └────────────────────────┬───────────────────────────────┘
                          ↓
 ┌─ [1] 装载 ─────────────────────────────────────────────┐
@@ -219,12 +220,13 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
                          ↓
 ┌─ [4] 写回 ─────────────────────────────────────────────┐
 │  planctl complete <id> --summary ... --next-focus ...  │
+│    --continue                                          │
 │  事实落盘 + 自动刷新 handoff                           │
 └────────────────────────┬───────────────────────────────┘
                          ↓
 ┌─ [5] 续跑判定 ─────────────────────────────────────────┐
-│  立刻 next --strict                                    │
-│  若新 current phase 仍是占位合同，先补正式合同再重跑   │
+│  服从 advance 返回的 ACTION                            │
+│  若 ACTION: promote_placeholder，先补正式合同再重跑    │
 └────────────────────────┬───────────────────────────────┘
                          ↓
            还有下一 phase？  ── 否 → 整体任务结束
@@ -306,14 +308,14 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
 
 至少需要声明以下 10 条硬约束：
 
-1. 开始前必须先读 manifest，再跑 `planctl next --strict` 或 `resolve --strict`
+1. 开始前必须先读 manifest，再跑 `planctl advance --strict` 或 `resolve --strict`
 2. 不得绕过脚本手工选择当前 phase
 3. 不得跳过 `depends_on` 检查
 4. 装载上下文必须严格按 `required_context` 顺序，不得扩读未来 phase 的文档
 5. 长流程中工作窗口必须保持"只装 3 份文档"
 6. 未运行 `complete` 的 phase 不视为完成
-7. 每完成一个 phase 必须立刻再次解析下一 phase；若 strict 因占位合同失败，先补正式合同，不得把这一步当成用户确认点
-8. 压缩或新会话恢复只走"manifest → handoff → next"三步
+7. 每完成一个 phase 必须用 `complete --continue` 立刻解析下一 `ACTION`；若返回 `promote_placeholder`，先补正式合同，不得把这一步当成用户确认点
+8. 压缩或新会话恢复只走"manifest → handoff → advance"三步
 9. `handoff --write` 仅是手动补救，不在常规 Golden Loop 里
 10. 业务 phase 期间不得自行 `git commit` / `git push` / `git tag`；里程碑提交权统一交给 `planctl complete` 自动行使
 
@@ -327,9 +329,9 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
 2. **写 manifest 骨架**（5 分钟）：列出 phase id 和 depends_on，不填内容
 3. **写 common.md**（10 分钟）：5–10 条硬约束，从技术栈/非目标/质量底线三个维度各挑几条
 4. **写第一个 phase 的正式合同 + future phase 的占位合同**（10 分钟）：只把 `phase-0` 写成正式合同；后面的 phase 先写带 `PHASE_CONTRACT_PLACEHOLDER` 的成对占位文件，轮到时再升级
-5. **启动**：`ruby scripts/planctl next --format prompt --strict`，按输出开工
+5. **启动**：`ruby scripts/planctl advance --strict`，按输出开工
 
-第一圈跑通后，后续每个 phase 只需要：`complete` → `next` → 若 strict 因占位合同失败则补两份正式合同 → 继续实现。
+第一圈跑通后，后续每个 phase 只需要：`complete --continue` → 服从 `advance` 的 `ACTION` → 若 `promote_placeholder` 则补两份正式合同 → 继续实现。
 
 ---
 
@@ -341,7 +343,7 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
 | 2 | execution 写成步骤清单 | AI 照做但越界 | 改成路径白名单 + 禁止项 + 裁决规则 |
 | 3 | common.md 混入易变规则 | 流程频繁抖动 | 易变项下放到 phase |
 | 4 | 完成判定写主观语言 | AI 自我感觉良好就宣告完成 | 改为可勾选客观项 |
-| 5 | 把 phase 边界误当成用户确认点 | agent 在 complete 后停住 | 把“再次 next；若占位则补正式合同”写成内部动作 |
+| 5 | 把 phase 边界误当成用户确认点 | agent 在 complete 后停住 | 用 `advance` 状态机输出内部动作 |
 | 6 | 忽视仓库级指令 | AI 直接上手，不跑 resolver | 把指令同时写进 `.github/copilot-instructions.md` / `CLAUDE.md` / `AGENTS.md` 三份 |
 | 7 | 让 AI 代写 manifest 和 common | 被 AI 的拟合带偏全局 | 这两份文档必须由人类主导 |
 
@@ -394,12 +396,12 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
   P8 里程碑外部化
 
 Golden Loop：
-  [0] next --strict
+  [0] advance --strict
   [1] 读 3 份上下文
   [2] 实施（守边界）
   [3] 过交付检查
-  [4] complete
-  [5] 再次 next --strict；若占位则补正式合同
+  [4] complete --continue
+  [5] 服从 ACTION；若 promote_placeholder 则补正式合同
   → [0]
 
 压缩恢复：

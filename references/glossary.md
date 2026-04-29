@@ -68,8 +68,9 @@ Phase-Contract 的"地基"。违反任何一条，长任务都会在 2–3 小�
 
 | 命令 | 作用 |
 | --- | --- |
-| `planctl next --strict` | 计算下一个应执行的 phase，返回 `required_context`；`--strict` 阻断未满足依赖的跳步 |
-| `planctl resume --strict` | 压缩后冷启动一键恢复：项目概览 + handoff 快照 + 下一 phase resolve 结果 |
+| `planctl advance --strict` | 计算连续执行的下一内部动作，返回 `ACTION: implement/promote_placeholder/finalize/stop`；只有真实 blocker 才阻断 |
+| `planctl next --strict` | 兼容命令：计算下一个应执行的 phase，返回 `required_context`；`--strict` 阻断未满足依赖的跳步 |
+| `planctl resume --strict` | 压缩后冷启动一键恢复：项目概览 + handoff 快照 + 下一步 ACTION |
 | `planctl complete <id>` | 完成入口：原子写回 `state.yaml` + 刷新 `handoff.md` + `git add/commit/push` 里程碑 |
 | `planctl revert <id>` | 回退某个 phase：默认 `git revert` 保留历史；下游依赖未回退时拒绝执行 |
 | `planctl doctor` | 仓库体检：SHA256 比对三份 agent 指令、校验 manifest/state/handoff 引用一致性 |
@@ -81,9 +82,9 @@ Phase-Contract 的"地基"。违反任何一条，长任务都会在 2–3 小�
 每个 phase 走同一条五步环路。中断点随时可压缩或换会话，下轮从起点重入即**无损续跑**。
 
 ```text
-next --strict  →  读 3 份上下文  →  实施（守 execution 边界）
+advance --strict  →  读 3 份上下文  →  实施（守 execution 边界）
                                             ↓
-                     ← handoff (脚本自动)  ←  complete <id>
+                     ← handoff (脚本自动)  ←  complete <id> --continue
 ```
 
 ## 8. 三阶段恢复协议（Recovery Protocol）
@@ -93,7 +94,7 @@ next --strict  →  读 3 份上下文  →  实施（守 execution 边界）
 ```text
 1. 读 plan/manifest.yaml   —— 拿到全局地图
 2. 读 plan/handoff.md      —— 拿到上次留下的锚点
-3. 跑 planctl next --strict —— 拿到下一步要做什么与 required_context
+3. 跑 planctl advance --strict —— 拿到下一步 ACTION 与 required_context
 ```
 
 一条命令版：`ruby scripts/planctl resume --strict`。
