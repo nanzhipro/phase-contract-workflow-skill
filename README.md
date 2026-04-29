@@ -68,14 +68,14 @@ npx skills add github:nanzhipro/phase-contract-workflow-skill --agent claude
 npx skills add github:nanzhipro/phase-contract-workflow-skill --agent copilot
 npx skills add github:nanzhipro/phase-contract-workflow-skill --agent codex
 
-# Update to latest main
-npx skills update phase-contract-workflow-skill
+# Update to latest main (add `-g` if it was installed globally)
+npx skills update phase-contract-workflow -g
 
 # Force reinstall (overwrites local edits - back up first)
 npx skills add nanzhipro/phase-contract-workflow-skill --force
 
 # Remove
-npx skills remove phase-contract-workflow-skill
+npx skills remove phase-contract-workflow -g
 ```
 
 Once installed, just tell the Agent "plan XXX with Phase-Contract" in any session. The Skill's discovery description lives in the [SKILL.md](./SKILL.md) frontmatter.

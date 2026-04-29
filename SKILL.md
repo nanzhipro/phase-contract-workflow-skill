@@ -63,16 +63,16 @@ argument-hint: "(optional) target project path and short project description"
 
 ## Core Principles (不可违反)
 
-| #   | 原则           | 落地动作                                                               |
-| --- | -------------- | ---------------------------------------------------------------------- |
-| P1  | 状态外部化     | 进度写 `state.yaml`，不写 AI 记忆                                      |
-| P2  | 调度与执行分离 | 脚本决定做什么，AI 决定怎么做                                          |
-| P3  | 三文件上下文律 | 工作窗口只装 `common + phase + execution` 三份文档                     |
-| P4  | 双层合同       | `phases/*` 说"是什么"，`execution/*` 说"能碰什么"                      |
-| P5  | 依赖强制校验   | `depends_on` + `--strict` 阻断跳步                                     |
-| P6  | 完成即写入     | `complete` 原子写回 `state.yaml` 与 `handoff.md`，缺一不进下一圈       |
-| P7  | 固定恢复协议   | 压缩后永远三步：manifest → handoff → next                              |
-| P8  | 里程碑外部化   | `complete` 自动 `git add/commit/push`；有 remote 时形成远端记录，无 remote 时保留本地可回滚里程碑 |
+| #   | 原则           | 落地动作                                                                                             |
+| --- | -------------- | ---------------------------------------------------------------------------------------------------- |
+| P1  | 状态外部化     | 进度写 `state.yaml`，不写 AI 记忆                                                                    |
+| P2  | 调度与执行分离 | 脚本决定做什么，AI 决定怎么做                                                                        |
+| P3  | 三文件上下文律 | 工作窗口只装 `common + phase + execution` 三份文档                                                   |
+| P4  | 双层合同       | `phases/*` 说"是什么"，`execution/*` 说"能碰什么"                                                    |
+| P5  | 依赖强制校验   | `depends_on` + `--strict` 阻断跳步                                                                   |
+| P6  | 完成即写入     | `complete` 原子写回 `state.yaml` 与 `handoff.md`，缺一不进下一圈                                     |
+| P7  | 固定恢复协议   | 压缩后永远三步：manifest → handoff → next                                                            |
+| P8  | 里程碑外部化   | `complete` 自动 `git add/commit/push`；有 remote 时形成远端记录，无 remote 时保留本地可回滚里程碑    |
 | P9  | 显式整体收尾   | 全部 phase 完成后必须跑 `planctl finalize` 输出最终仪表盘并把决策权交还人类，AI 不得自行宣告项目结束 |
 
 ## Procedure

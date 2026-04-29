@@ -68,14 +68,14 @@ npx skills add github:nanzhipro/phase-contract-workflow-skill --agent claude
 npx skills add github:nanzhipro/phase-contract-workflow-skill --agent copilot
 npx skills add github:nanzhipro/phase-contract-workflow-skill --agent codex
 
-# 升级到最新 main
-npx skills update phase-contract-workflow-skill
+# 升级到最新 main（全局安装要加 `-g`）
+npx skills update phase-contract-workflow -g
 
 # 重装（覆盖本地修改，请先备份）
 npx skills add nanzhipro/phase-contract-workflow-skill --force
 
 # 卸载
-npx skills remove phase-contract-workflow-skill
+npx skills remove phase-contract-workflow -g
 ```
 
 安装后在对应 Agent 会话里直接说「用 Phase-Contract 规划 XXX 项目」即可触发；Skill 的发现描述见 [SKILL.md](./SKILL.md) 的 frontmatter。
