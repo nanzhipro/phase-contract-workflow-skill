@@ -88,18 +88,21 @@ Every Phase runs the same loop. You can compress or swap sessions at any breakpo
 next --strict  →  load 3 docs  →  execute (within execution boundary)
                                            ↓
                     ← handoff (by script) ← complete <id>
+                                           ↓
+                              (all phases done) → finalize
 ```
 
-A single command kicks off or resumes:
+A single command kicks off, resumes, or wraps up:
 
 ```bash
 ruby scripts/planctl next --format prompt --strict     # new session / daily driver
 ruby scripts/planctl resume --strict                   # cold start after compression
 ruby scripts/planctl complete <id> --summary "..." --next-focus "..."
+ruby scripts/planctl finalize                          # whole-plan close-out dashboard (only after every phase is done)
 ruby scripts/planctl doctor                            # repo health check (SHA256-diff the three instruction files, etc.)
 ```
 
-Phase boundaries are internal, not user confirmation points. After `complete`, immediately rerun `next --strict`; if the new current Phase is still a placeholder pair, promote both contracts to formal docs first. Details live in [references/phase-templates.md](./references/phase-templates.md) and [references/workflow-template.md](./references/workflow-template.md).
+Phase boundaries are internal, not user confirmation points. After `complete`, immediately rerun `next --strict`; if the new current Phase is still a placeholder pair, promote both contracts to formal docs first. When `next` reports every Phase done, do **not** declare the project finished — run `finalize` to print the final execution dashboard and hand release / tag / archive decisions back to a human. Details live in [references/phase-templates.md](./references/phase-templates.md) and [references/workflow-template.md](./references/workflow-template.md).
 
 ## Design principles
 
@@ -109,6 +112,7 @@ Phase boundaries are internal, not user confirmation points. After `complete`, i
 - **Two-layer contract** - `phases/*` says _what it is_; `execution/*` says _what may be touched_ - goal and boundary kept orthogonal.
 - **Done means written** - a Phase that is not in `state.yaml` is not done, however eloquently the AI reports otherwise.
 - **Recovery is a first-class citizen** - `handoff.md` is a protocol, not a scratchpad.
+- **Close-out is explicit** - finishing the last Phase is not finishing the project; `finalize` produces the dashboard, the human makes the release call.
 
 Full eight principles, three invariants, failure model, and mitigation mapping: [references/methodology.md](./references/methodology.md).
 

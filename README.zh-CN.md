@@ -88,18 +88,21 @@ npx skills remove phase-contract-workflow-skill
 next --strict  →  读 3 份上下文  →  实施（守 execution 边界）
                                              ↓
                        ← handoff (脚本自动)  ←  complete <id>
+                                             ↓
+                                  （全部完成）→ finalize
 ```
 
-一条命令即可启动或恢复：
+一条命令即可启动、恢复或收尾：
 
 ```bash
 ruby scripts/planctl next --format prompt --strict     # 新会话 / 日常推进
 ruby scripts/planctl resume --strict                   # 压缩后冷启动
 ruby scripts/planctl complete <id> --summary "..." --next-focus "..."
+ruby scripts/planctl finalize                          # 全计划收尾仪表盘（仅在所有 phase 完成后可用）
 ruby scripts/planctl doctor                            # 仓库体检（三份指令 SHA256 比对等）
 ```
 
-phase 边界是内部动作，不是用户确认点。`complete` 之后要立刻再跑一次 `next --strict`；如果新 current phase 仍是占位合同，先把两份合同升级成正式文档，再继续实现。细节见 [references/phase-templates.md](./references/phase-templates.md) 和 [references/workflow-template.md](./references/workflow-template.md)。
+phase 边界是内部动作，不是用户确认点。`complete` 之后要立刻再跑一次 `next --strict`；如果新 current phase 仍是占位合同，先把两份合同升级成正式文档，再继续实现。当 `next` 报告全部 phase 已完成，**不要**直接对用户宣告项目结束——跑一次 `finalize` 输出最终执行仪表盘，把发版 / 打 tag / 归档 `plan/` 等决策点交还人类。细节见 [references/phase-templates.md](./references/phase-templates.md) 与 [references/workflow-template.md](./references/workflow-template.md)。
 
 ## Design principles
 
@@ -109,6 +112,7 @@ phase 边界是内部动作，不是用户确认点。`complete` 之后要立刻
 - **双层合同**：`phases/*` 说"是什么"，`execution/*` 说"能碰什么"，目标与边界正交。
 - **完成即事实**：未进 `state.yaml` 的 Phase 不视为完成，不管 AI 自述多么漂亮。
 - **恢复是一等公民**：`handoff.md` 不是备忘录，是协议。
+- **收尾要显式**：跑完最后一个 Phase 不等于项目结束；`finalize` 输出仪表盘，发版与否交由人类决定。
 
 完整的八原则、三不变量、失败模型与封堵映射，参见 [references/methodology.md](./references/methodology.md)。
 

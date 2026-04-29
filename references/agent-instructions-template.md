@@ -121,6 +121,7 @@
 - 不得手工编辑 `plan/state.yaml` 和 `plan/handoff.md` 来伪造进度或恢复状态，除非任务本身就是维护流程基础设施。
 - 不得在未满足当前 phase 完成条件时宣告完成。
 - 不得在当前 phase 实施期间自行 `git commit` / `git push` / `git tag`；提交权统一由 `scripts/planctl complete` 自动行使。
+- 不得在所有 phase 完成后跳过 `ruby scripts/planctl finalize`，直接对人类宣告“项目结束”或自行执行收尾动作（打 tag、归档 plan、发布等）。最终决策必须由人类基于 finalize 输出做出。
 
 ## 十一、流程基础设施维护例外
 
@@ -139,3 +140,34 @@
 2. 如涉及 `scripts/planctl`，必须验证命令行为与文档描述一致。
 3. 如涉及文档入口或恢复规则，必须同步更新相关入口文档。
 4. 不得只改说明文字而不改实际流程，也不得只改脚本而不改说明文字。
+
+## 十二、整体收尾规约（Finalization）
+
+当且仅当 `manifest.yaml` 中所有 phase 都已写入 `plan/state.yaml` 的 `completed_phases`、且 `ruby scripts/planctl next --format prompt --strict`（或最近一次 `complete`）输出 “All phases are completed” 时，进入整体收尾流程。
+
+1. 必须立刻运行 `ruby scripts/planctl finalize`（默认 `text` 格式即可，需要结构化数据时再加 `--format json`）。
+2. `finalize` 在所有 phase 真正完成前会以 exit 2 拒绝执行；不得用 `PHASE_CONTRACT_*` 环境变量或手工修改 `state.yaml` 的方式绕过。
+3. 拿到 `finalize` 输出后，必须做一次**深入审视**，不要只复述：
+   - 通读 `manifest.yaml`、`plan/state.yaml`、`plan/handoff.md` 和最近 N 个里程碑 commit，确认 finalize 仪表盘里的 phase ledger、git 状态、health 检查与实际仓库吻合。
+   - 找出 finalize 没明说但客观存在的风险：例如某个 phase 的 summary 与其实际 diff 不一致、某条 recommended next step 在本项目语境下不适用、health notes 提示的轻警告是否需要升级为 issue。
+   - 把 finalize 的“Recommended human next steps” 翻译成针对本项目的具体动作（带命令、目标分支、责任人/审阅者、时限），而不是原样转述通用建议。
+4. 必须以**最终执行仪表盘**的形式向人类汇报，至少包含：
+   - 项目总览：phase 总数、完成数、首/末完成时间、总 elapsed。
+   - Phase 台账：每个 phase 的 id、标题、完成时间、summary、对应里程碑 commit。
+   - 仓库状态：当前分支、upstream、ahead/behind、working tree 是否干净、未推送 commit、最近 commit。
+   - Health 检查：finalize 的 issues / notes 是否全绿，必须人工处置的项明确列出。
+   - 风险与遗留：本次 plan 留下的已知 TODO、未覆盖范围、需要人工复核的灰色地带。
+   - 推荐人类下一步：分“立即”、“短期”、“可选”三档，每条带可执行命令或决策点。
+5. 在仪表盘最后必须明确把决策权交还人类：
+   - 是否上线 / 发版 / 对外公布；
+   - 是否对成果打 release tag；
+   - 是否把 `plan/` 归档（`git mv plan plan-archive-<date>`）后开启下一项规划，或保留 `plan/` 作为长期档案；
+   - 是否安排长期维护、轮值或回归测试；
+   - 是否需要安全 / 合规 / 法务审阅。
+6. 在人类未明确指示之前，**不得**自行执行任何收尾动作：
+   - 不得 `git tag` / `git push --tags` / 创建 release；
+   - 不得删除、重命名、移动 `plan/` 或 `scripts/planctl`；
+   - 不得进入下一项规划（不要重跑本 Skill 的脚手架），除非人类显式要求；
+   - 不得在 finalize 之后再运行 `complete`、`revert` 或修改 `state.yaml`；如发现需要回退，先把回退请求作为 blocker 报告给人类，由人类决定是否走 `revert`。
+7. 若 finalize 的 health 检查报告 issue（exit 0 但有 issue 项时不会非零退出，需自行解读），按 §七 把它当作 blocker 处理：先汇报，由人类决定是先修问题再宣告完成、还是接受现状收尾。
+8. finalize 是会话级别的“最后一公里”，每一项 plan 仅运行一次（除非 plan 被显式延展、新 phase 被加入 manifest 后又跑完一轮）。重复 `finalize` 不会产生副作用，但应避免把它当成 status 替代品频繁调用。

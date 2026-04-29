@@ -73,6 +73,7 @@ argument-hint: "(optional) target project path and short project description"
 | P6  | 完成即写入     | `complete` 原子写回 `state.yaml` 与 `handoff.md`，缺一不进下一圈       |
 | P7  | 固定恢复协议   | 压缩后永远三步：manifest → handoff → next                              |
 | P8  | 里程碑外部化   | `complete` 自动 `git add/commit/push`；有 remote 时形成远端记录，无 remote 时保留本地可回滚里程碑 |
+| P9  | 显式整体收尾   | 全部 phase 完成后必须跑 `planctl finalize` 输出最终仪表盘并把决策权交还人类，AI 不得自行宣告项目结束 |
 
 ## Procedure
 
@@ -171,6 +172,8 @@ ruby scripts/planctl next --format prompt --strict
 ruby scripts/planctl complete <phase-id> --summary "<做了什么>" --next-focus "<下一个 phase 要关注什么>"
 
 # complete 后立刻再次运行 next --strict；若当前 phase 仍是占位合同，先补正式合同，再开始实现
+# 当 next 返回 "All phases are completed" 时，跑一次 finalize 收尾，不要直接收工
+ruby scripts/planctl finalize
 ```
 
 > 注：`complete` 已自动 `write_state` → `write_handoff_file`（均为 tmp+rename 原子写入）。`ruby scripts/planctl handoff --write` 仅作为**手动补救**：比如你手改了 `state.yaml` 但忘了别的联动刷新，或 `complete` 后 `handoff.md` 被意外编辑需要重放。正常循环不需要多这一步。
@@ -199,6 +202,7 @@ ruby scripts/planctl doctor
 - `complete` 是写回 state + handoff + git 里程碑的原子入口；**不要**再对其补一次 `handoff --write`，未跑 `complete` 的 phase 则直接不视为完成
 - `complete` 之后必须立刻再次解析下一 phase；若 strict 因占位合同失败，先升级该 phase 的两份合同，不要停下来问用户是否继续
 - 未写入 `state.yaml` 的 phase 不视为完成，不管 AI 自己说做得多好
+- 当 `next` / `complete` 输出 “All phases are completed”，下一动作不是直接对人类宣告项目结束，而是跑 `ruby scripts/planctl finalize`，把仪表盘和决策权按 Step 8 交还人类
 
 ### Step 7: 里程碑提交与推送（`complete` 自动执行）
 
@@ -234,6 +238,45 @@ To git@github.com:acme/widget.git
    c6a54d1..33b5258  main -> main
 ```
 
+### Step 8: 整体收尾（`planctl finalize`）
+
+每一份 plan 在“最后一个 phase 也跑完 `complete`”之后，**还差一步**才算真正结束：跑一次 `ruby scripts/planctl finalize`，把全部状态聚合成最终执行仪表盘并把决策权交还人类。这一步是 Skill 的最后一公里，不是可选优化。
+
+触发条件（满足任一即进入收尾）：
+
+- `complete` 的输出里出现 `All phases are completed. No remaining work.`
+- `next` 或 `resume` 的输出里出现 `All phases are completed.`
+
+AI 必须立刻执行的动作（连续执行，不需要用户确认）：
+
+```bash
+ruby scripts/planctl finalize
+```
+
+`finalize` 仅在 `state.yaml` 已包含 manifest 中全部 phase 时才会运行，否则以 exit 2 拒绝（防止半成品 plan 被误收尾）。它一次性聚合：
+
+1. **项目总览**：phase 总数 / 完成数、首末完成时间戳、累计 elapsed。
+2. **Phase 台账**：每个 phase 的 id、标题、completed_at、summary、next_focus，以及 `git log --grep "Phase-Id: <id>"` 找到的里程碑 commit SHA。找不到的 phase 会被显式标出，提示人工对账。
+3. **仓库状态**：当前分支、upstream、ahead/behind、工作树是否干净、未提交文件清单（截断到前 10 条）、配置的 remotes、最近一次 commit。
+4. **Health 检查**：manifest → plan_file/execution_file 引用是否还存在、`state.yaml` 中的 phase id 是否都在 manifest 里、三份 agent 指令（Copilot / CLAUDE / AGENTS）是否仍然 SHA256 一致。issue 与 note 分开列。
+5. **Recommended human next steps**：基于上面四块自动推导，例如有未推送 commit 就提示 `git push`、没有 remote 就提示先 `git remote add origin`、有 phase 缺 summary 就提示补叙述，并附上一组**通用收尾动作**（端到端验收、人类 code review、决定是否打 release tag、归档 `plan/`、写对外交付说明、把发版/维护决策交还人类）。
+
+拿到 finalize 输出后，AI **必须再做一次深入审视**，不要原样转发：
+
+- 通读 `manifest.yaml` / `state.yaml` / `handoff.md` 与最近 N 条里程碑 commit，验证仪表盘里的 phase ledger、git 状态、health 与仓库实情吻合。
+- 把通用建议翻译成本项目的具体动作（带命令、目标分支、潜在审阅者、时限），区分“立即必须”、“短期推进”、“可选优化”。
+- 找出 finalize 没显式说但客观存在的风险：例如某条 summary 与 diff 不一致、某条建议在本项目语境下不适用、health notes 中的轻警告是否需要升级为 issue。
+
+最后必须以**最终执行仪表盘**形式向人类汇报，并显式把以下决策点交还人类（**AI 不得自行执行**）：
+
+- 是否上线 / 发版 / 对外公布
+- 是否对成果打 release tag（`git tag -a vX.Y.Z`、是否 `git push --tags`）
+- 是否归档 `plan/`（`git mv plan plan-archive-<date>`）后开启下一项规划，或保留作为长期档案
+- 是否安排长期维护、轮值或回归测试
+- 是否需要安全 / 合规 / 法务审阅
+
+在人类未明确指示之前，AI 不得 `git tag` / 推 tag / 删除或移动 `plan/` / 重跑本 Skill 脚手架 / 继续修改 `state.yaml`。若 finalize 的 health 报告了 issue，按 Step 7 的"中止条件"逻辑先汇报由人类决定是先修问题再收尾还是接受现状收尾。重复 `finalize` 无副作用但应避免当 status 用。
+
 ## Decision Points
 
 **phase 数 > 12**：当场要求重切，或引入 `epic` 分组层（见 [references/methodology.md §7.1](./references/methodology.md)）。
@@ -256,6 +299,8 @@ To git@github.com:acme/widget.git
 
 **怀疑 state/agent 指令失同步**：运行 `ruby scripts/planctl doctor`。按 SHA256 对比 `.github/copilot-instructions.md`、`CLAUDE.md`、`AGENTS.md` 三份指令是否字节一致，校验 manifest 引用、state 与 handoff 的一致性；发现问题以 exit 2 退出。
 
+**最后一个 phase 也跑完 `complete` 了**：不要直接对用户宣告“项目完成”。立刻按 Step 8 跑 `ruby scripts/planctl finalize`，把仪表盘汇报给人类并显式把发版 / 打 tag / 归档 `plan/` / 安排维护等决策点交还。`finalize` 在 phase 未全部完成时会 exit 2 拒绝运行，所以它本身就是“是否真正可以收尾”的判定门。
+
 ## Quality Gates
 
 生成完成后逐项核对：
@@ -275,6 +320,8 @@ To git@github.com:acme/widget.git
 - [ ] 当某个 future phase 仍是占位合同且它变成 current phase 时，`planctl next --strict` / `resolve --strict` 会以 exit 2 拒绝开始实现，直到两份合同被升级
 - [ ] 首次 `complete` 前若仓库已出现未跟踪中间产物，AI 已基于可再生性、交付边界与项目约定自行判断并更新根目录 `.gitignore`，且不会把这些产物带进里程碑提交
 - [ ] 若目标项目已配置 `git remote`，其当前分支可推送；若暂时无 remote，已在对用户的交付说明里明确说明：后续 `complete` 将仅本地 commit、跳过 push，但**不阻塞**继续执行后续任务
+- [ ] `scripts/planctl finalize` 在 phase 尚未全部完成时以 exit 2 拒绝运行；当且仅当 `state.yaml` 包含全部 manifest phase 时才打印仪表盘
+- [ ] 三份 agent 指令均含 §十二「整体收尾规约（Finalization）」，且禁止行为里明确不得跳过 `finalize` 自行宣告项目结束
 
 ## References
 

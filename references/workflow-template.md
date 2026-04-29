@@ -68,6 +68,7 @@
 - `status`: 展示已完成、可执行、被阻塞的 phase
 - `complete`: 在 phase 真完成后把状态写回 `plan/state.yaml`
 - `handoff`: 生成或刷新 `plan/handoff.md`
+- `finalize`: 全部 phase 完成后聚合最终执行仪表盘并给出人类下一步建议
 
 ### `plan/state.yaml`
 
@@ -235,19 +236,35 @@ ruby scripts/planctl revert <phase-id> [--mode revert|reset] [--summary "<reason
 
 ## 如何结束全部计划
 
-当全部 phase 都完成后，再运行：
+当全部 phase 都完成后，先运行：
 
 ```bash
 ruby scripts/planctl next --format prompt --strict
 ```
 
-如果没有剩余 phase，脚本会返回全部完成的结果。此时：
+如果没有剩余 phase，脚本会返回全部完成的结果，并提示进入整体收尾。此时：
 
 - `plan/state.yaml` 中应包含全部 phase
 - `plan/handoff.md` 中不再有下一 phase
 - `planctl status` 会显示没有 remaining queue
 
-这才算整个计划真正结束。
+但**到此还没有真正结束**。Phase-Contract 把“全部 phase 完成”和“项目可交付收尾”刻意分成两步：前者由 `complete`/`next` 表示，后者必须由 AI 主动跑一次 `finalize`，并把仪表盘和决策权交回给人类。
+
+```bash
+ruby scripts/planctl finalize
+```
+
+`finalize` 只在 `state.yaml` 已包含全部 manifest phase 时才会运行（否则 exit 2），它会一次性聚合：
+
+- 项目总览（phase 总数、完成数、首/末完成时间、累计 elapsed）
+- Phase 台账（每个 phase 的标题、完成时间、summary、next_focus、对应里程碑 commit SHA）
+- 仓库状态（当前分支、upstream、ahead/behind、工作树是否干净、未推送 commit、最近 commit）
+- Health 检查（manifest 引用、state/handoff 一致性、三份 agent 指令 SHA256 对齐）
+- 推荐的人类下一步（基于上面四块自动推导，例如有未推送 commit 就提示 `git push`，没有 remote 就提示先补 remote）
+
+AI 拿到 finalize 输出后，必须做一次**深入审视**：核对仪表盘与仓库实情是否一致、把通用建议翻译成本项目可执行的命令与责任人、识别 finalize 没显式列出但客观存在的风险（例如某个 phase 的 summary 与 diff 不符），并以**最终执行仪表盘**的形式向人类汇报。汇报最后必须显式把以下决策点交还人类：是否上线/发版、是否打 release tag、是否归档 `plan/`、是否安排长期维护、是否需要外部审阅。
+
+在人类没有显式指示之前，AI 不得自行 `git tag`、推 tag、删除/移动 `plan/`、开启下一轮规划或继续修改 `state.yaml`。这才算整个计划真正结束。
 
 ## 如何在压缩或新会话后继续执行
 
@@ -309,6 +326,12 @@ ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<ne
 ruby scripts/planctl handoff --write
 ```
 
+整体收尾仪表盘（所有 phase 完成后唯一的最后一步）：
+
+```bash
+ruby scripts/planctl finalize
+```
+
 ## 一句话总结
 
-这套流程通过 manifest 定义顺序，通过 planctl 推进状态，通过 state 记录完成事实，通过 handoff 处理压缩恢复，并在 phase 边界把“先补正式合同再实现”写成脚本可阻断的内部动作，从而保证全部任务能按既定顺序、完整执行，并且可以在长流程中稳定续跑。
+这套流程通过 manifest 定义顺序，通过 planctl 推进状态，通过 state 记录完成事实，通过 handoff 处理压缩恢复，并在 phase 边界把“先补正式合同再实现”写成脚本可阻断的内部动作；最后由 `finalize` 把全部状态、里程碑和健康检查汇聚成最终执行仪表盘，再把发版、归档、维护等决策权显式交还人类，从而保证全部任务能按既定顺序、完整执行、稳定续跑，并以一次审计可见的收尾真正结束。

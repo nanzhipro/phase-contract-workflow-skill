@@ -191,6 +191,7 @@ class PlanCtl
       puts "Next phase: #{next_phase['id']} (#{next_phase['title']}). Run: ruby scripts/planctl next --format prompt --strict"
     else
       puts 'All phases are completed. No remaining work.'
+      puts 'Final step: run `ruby scripts/planctl finalize` to print the final execution dashboard and recommended human next steps.'
     end
   end
 
@@ -361,6 +362,7 @@ class PlanCtl
       exit(2) if strict && !result['ready']
     else
       puts 'All phases are completed. Nothing to resume.'
+      puts 'Final step: run `ruby scripts/planctl finalize` to print the final execution dashboard and recommended human next steps.'
     end
   end
 
@@ -459,6 +461,42 @@ class PlanCtl
       puts 'Problems:'
       problems.each { |p| puts "- #{p}" }
       exit 2
+    end
+  end
+
+  # Final wrap-up dashboard. Runs only when every manifest phase is in
+  # state.yaml's completed_phases. Aggregates manifest, state ledger,
+  # handoff, git history (milestone commits), working-tree health, and
+  # doctor-style integrity checks into a single review payload, then
+  # prints a tailored "human next steps" checklist. The AI is expected
+  # to render the dashboard verbatim to the user and add deeper review
+  # commentary on top — finalize itself never declares the project
+  # closed; that decision is the human's.
+  def finalize(format:)
+    ensure_git_repo!
+    state = load_state
+    completed = Array(state['completed_phases'])
+    phases = manifest_phases
+    remaining = phases.reject { |p| completed.include?(p['id']) }
+
+    unless remaining.empty?
+      warn "Cannot finalize: #{remaining.length} phase(s) still pending — #{remaining.map { |p| p['id'] }.join(', ')}."
+      warn '[planctl] finalize only runs after every manifest phase is in state.yaml. Run `ruby scripts/planctl next --format prompt --strict` to resume.'
+      exit 2
+    end
+
+    if completed.empty? || phases.empty?
+      warn 'Cannot finalize: no phases recorded as completed yet (state.yaml empty or manifest has no phases).'
+      exit 2
+    end
+
+    dashboard = build_finalize_dashboard(state)
+
+    case format
+    when 'json'
+      puts JSON.pretty_generate(dashboard)
+    else
+      render_finalize_dashboard(dashboard)
     end
   end
 
@@ -672,6 +710,15 @@ class PlanCtl
     ''
   end
 
+  # Like `capture_git`, but discards stderr. Intended for queries whose
+  # absence is a normal signal (e.g. `rev-parse @{u}` when no upstream is
+  # configured) so the dashboard does not surface raw git error text.
+  def capture_git_silent(*args)
+    IO.popen(['git', '-C', @repo_root.to_s, *args], err: File::NULL, &:read).to_s
+  rescue Errno::ENOENT
+    ''
+  end
+
   def env_truthy?(name)
     value = ENV[name]
     return false if value.nil? || value.empty?
@@ -838,7 +885,8 @@ class PlanCtl
       'complete' => true,
       'message' => 'All phases are completed.',
       'state_file' => state_file_relative,
-      'handoff_file' => handoff_file_relative
+      'handoff_file' => handoff_file_relative,
+      'finalize_command' => 'ruby scripts/planctl finalize'
     }
 
     case format
@@ -848,6 +896,7 @@ class PlanCtl
       puts 'All phases are completed.'
       puts "State file: #{result['state_file']}"
       puts "Handoff file: #{result['handoff_file']}"
+      puts 'Final step: run `ruby scripts/planctl finalize` to print the final execution dashboard and recommended human next steps.'
     end
   end
 
@@ -1122,6 +1171,266 @@ class PlanCtl
     Array(@manifest.dig('execution_rule', 'compression_control', 'rules'))
   end
 
+  # ---- finalize helpers ---------------------------------------------------
+
+  def build_finalize_dashboard(state)
+    completed = Array(state['completed_phases'])
+    log_by_id = {}
+    Array(state['completion_log']).each do |entry|
+      next unless entry.is_a?(Hash)
+      next unless entry['phase_id']
+      next unless entry['completed_at']
+      # last-write-wins so that re-completion (rare) reflects the latest run
+      log_by_id[entry['phase_id']] = entry
+    end
+
+    phase_rows = manifest_phases.map do |phase|
+      entry = log_by_id[phase['id']] || {}
+      sha = capture_git('log', '--grep', "^Phase-Id: #{phase['id']}$", '-n', '1', '--format=%H').strip
+      {
+        'phase_id' => phase['id'],
+        'title' => phase['title'],
+        'completed_at' => entry['completed_at'],
+        'summary' => entry['summary'],
+        'next_focus' => entry['next_focus'],
+        'milestone_commit' => sha.empty? ? nil : sha
+      }
+    end
+
+    timestamps = phase_rows.map { |r| parse_iso8601(r['completed_at']) }.compact.sort
+    elapsed_seconds = timestamps.length >= 2 ? (timestamps.last - timestamps.first).to_i : nil
+
+    git_state = build_git_finalize_state
+    health = build_finalize_health(state)
+
+    {
+      'project' => @manifest['project'],
+      'repository' => @repo_root.to_s,
+      'manifest_file' => 'plan/manifest.yaml',
+      'state_file' => state_file_relative,
+      'handoff_file' => handoff_file_relative,
+      'phases_total' => manifest_phases.length,
+      'phases_completed' => completed.length,
+      'first_completion_at' => timestamps.first&.iso8601,
+      'last_completion_at' => timestamps.last&.iso8601,
+      'elapsed_seconds' => elapsed_seconds,
+      'elapsed_human' => elapsed_seconds && format_elapsed(elapsed_seconds),
+      'phase_rows' => phase_rows,
+      'git' => git_state,
+      'health' => health,
+      'recommended_next_steps' => build_finalize_recommendations(git_state, health, phase_rows)
+    }
+  end
+
+  def parse_iso8601(value)
+    return nil if value.nil? || value.empty?
+    Time.iso8601(value)
+  rescue ArgumentError
+    nil
+  end
+
+  def format_elapsed(seconds)
+    seconds = seconds.to_i
+    return '<1 minute' if seconds < 60
+
+    days, rem = seconds.divmod(86_400)
+    hours, rem = rem.divmod(3600)
+    minutes = rem / 60
+    parts = []
+    parts << "#{days}d" if days.positive?
+    parts << "#{hours}h" if hours.positive?
+    parts << "#{minutes}m" if minutes.positive? || parts.empty?
+    parts.join(' ')
+  end
+
+  def build_git_finalize_state
+    return { 'enabled' => false } if git_opt_out? || !git_work_tree?
+
+    branch = capture_git('rev-parse', '--abbrev-ref', 'HEAD').strip
+    branch = nil if branch.empty? || branch == 'HEAD'
+    upstream = capture_git_silent('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}').strip
+    upstream = nil if upstream.empty?
+
+    ahead_behind = nil
+    if upstream
+      raw = capture_git_silent('rev-list', '--left-right', '--count', "#{upstream}...HEAD").strip
+      if raw =~ /^(\d+)\s+(\d+)$/
+        ahead_behind = { 'behind' => Regexp.last_match(1).to_i, 'ahead' => Regexp.last_match(2).to_i }
+      end
+    end
+
+    porcelain = capture_git('status', '--porcelain').lines.map(&:chomp).reject(&:empty?)
+    remotes = capture_git('remote').split("\n").reject(&:empty?)
+    last_commit = capture_git('log', '-n', '1', '--format=%h %s').strip
+
+    {
+      'enabled' => true,
+      'branch' => branch,
+      'upstream' => upstream,
+      'ahead_behind' => ahead_behind,
+      'working_tree_clean' => porcelain.empty?,
+      'pending_changes' => porcelain,
+      'remotes' => remotes,
+      'last_commit' => last_commit.empty? ? nil : last_commit
+    }
+  end
+
+  def build_finalize_health(state)
+    require 'digest'
+    issues = []
+    notes = []
+
+    manifest_phases.each do |phase|
+      %w[plan_file execution_file].each do |key|
+        path = phase[key]
+        if path.nil? || path.empty?
+          issues << "manifest phase #{phase['id']} missing #{key}"
+        elsif !@repo_root.join(path).file?
+          issues << "manifest phase #{phase['id']}: #{key} #{path} missing on disk"
+        end
+      end
+    end
+
+    state_path = state_file_path
+    handoff_path = handoff_file_path
+    issues << 'state.yaml missing on disk' unless state_path.file?
+    issues << 'handoff.md missing on disk' unless handoff_path.file?
+
+    known_ids = manifest_phases.map { |p| p['id'] }
+    Array(state['completed_phases']).each do |id|
+      issues << "state.yaml lists completed phase #{id} not present in manifest" unless known_ids.include?(id)
+    end
+
+    instruction_files = %w[.github/copilot-instructions.md CLAUDE.md AGENTS.md]
+    existing = instruction_files.select { |p| @repo_root.join(p).file? }
+    if existing.empty?
+      notes << 'no agent instruction files found (Copilot/Claude/Codex)'
+    elsif existing.length < instruction_files.length
+      notes << "agent instruction file(s) missing: #{(instruction_files - existing).join(', ')}"
+    else
+      hashes = existing.map { |p| Digest::SHA256.hexdigest(@repo_root.join(p).read) }
+      if hashes.uniq.length > 1
+        issues << 'agent instruction files diverge (copilot/CLAUDE/AGENTS not byte-identical)'
+      else
+        notes << "agent instructions in sync (sha256=#{hashes.first[0, 12]})"
+      end
+    end
+
+    {
+      'issues' => issues,
+      'notes' => notes
+    }
+  end
+
+  def build_finalize_recommendations(git_state, health, phase_rows)
+    recs = []
+
+    if git_state['enabled']
+      unless git_state['working_tree_clean']
+        recs << "工作树尚有 #{git_state['pending_changes'].length} 处未提交变更，先 `git status` 审视并决定提交、暂存或丢弃，再做后续动作。"
+      end
+      ahead = git_state.dig('ahead_behind', 'ahead').to_i
+      behind = git_state.dig('ahead_behind', 'behind').to_i
+      if git_state['upstream'].nil?
+        if git_state['remotes'].empty?
+          recs << '仓库当前无 git remote。如需协作或留档，先 `git remote add origin <url>` 并 `git push -u origin HEAD`，把里程碑链路落到远端。'
+        else
+          recs << "当前分支无 upstream。运行 `git push -u #{git_state['remotes'].first} HEAD` 让里程碑可被审计。"
+        end
+      elsif ahead.positive?
+        recs << "本地比 upstream 领先 #{ahead} 个 commit，先 `git push` 让远端追上里程碑链。"
+      end
+      if behind.positive?
+        recs << "本地比 upstream 落后 #{behind} 个 commit；先 `git pull --rebase` 对齐再做收尾决定。"
+      end
+    else
+      recs << '当前为非 git 工作区模式（PHASE_CONTRACT_ALLOW_NON_GIT=1）。请按 `plan/common.md` 的偏离风险段所述的方式做一次外部审计与归档。'
+    end
+
+    missing_summary_phases = phase_rows.reject { |r| r['summary'] && !r['summary'].strip.empty? }
+    if missing_summary_phases.any?
+      recs << "下列 phase 没有完成摘要，建议补一次手动追述：#{missing_summary_phases.map { |r| r['phase_id'] }.join(', ')}。"
+    end
+    missing_milestone = phase_rows.reject { |r| r['milestone_commit'] }
+    if missing_milestone.any?
+      recs << "下列 phase 找不到 `Phase-Id: <id>` trailer 对应的里程碑 commit：#{missing_milestone.map { |r| r['phase_id'] }.join(', ')}。可能是手动 commit 或 history 被改写过，请人工核对一遍。"
+    end
+
+    if health['issues'].any?
+      recs << "Doctor 级问题（必须人工处置）：#{health['issues'].join('；')}。"
+    end
+
+    # Universal closing actions, in deliberate order.
+    recs << '跑一次端到端验收：单 phase 的交付检查只覆盖局部，最后必须有一次跨 phase 的功能/集成/性能/安全验收，确认整体目标真正达成。'
+    recs << '组织一次人工 code review：把里程碑 commit 链 + plan/state.yaml + plan/handoff.md + plan/phases 作为审计材料，让至少一位非本任务执行者审阅。'
+    recs << '决定如何打 release：若交付物对应可发布版本，运行 `git tag -a vX.Y.Z -m "..."` 并 push tag；否则在变更日志或交接文档中写清楚“此次未发版”的理由。'
+    recs << '把 plan/ 归档：保留作为复盘材料；若同一仓库还要继续下一轮规划，先 `git mv plan plan-archive-<date>` 再重跑本 Skill 生成新 plan，避免污染当前 manifest。'
+    recs << '写一份对外交付说明 / 复盘：面向相关方说明做了什么、为何这么做、留下什么风险与待办（区别于 phase 内 summary 的局部叙述）。'
+    recs << '与人类决策点对齐：是否上线、是否对外发布、是否安排长期维护、是否进入下一项规划。AI 不要自行决定这些；finalize 输出仅作为决策素材。'
+
+    recs
+  end
+
+  def render_finalize_dashboard(d)
+    puts '=== Phase-Contract Final Execution Dashboard ==='
+    puts "Project: #{d['project'] || '(unnamed)'}"
+    puts "Repository: #{d['repository']}"
+    puts "Manifest: #{d['manifest_file']}"
+    puts "State file: #{d['state_file']}"
+    puts "Handoff file: #{d['handoff_file']}"
+    puts
+    puts "Phases: #{d['phases_completed']}/#{d['phases_total']} completed"
+    if d['first_completion_at'] && d['last_completion_at']
+      puts "First completion: #{d['first_completion_at']}"
+      puts "Last completion:  #{d['last_completion_at']}"
+      puts "Elapsed: #{d['elapsed_human'] || 'n/a'}" if d['elapsed_human']
+    end
+    puts
+    puts '--- Phase ledger ---'
+    d['phase_rows'].each_with_index do |row, idx|
+      sha = row['milestone_commit'] ? row['milestone_commit'][0, 10] : '----------'
+      ts = row['completed_at'] || 'unknown'
+      puts "#{idx + 1}. [#{sha}] #{row['phase_id']}  #{row['title']}"
+      puts "   completed_at: #{ts}"
+      puts "   summary: #{row['summary'] || '(none recorded)'}"
+      puts "   next_focus: #{row['next_focus']}" if row['next_focus'] && !row['next_focus'].empty?
+    end
+    puts
+    puts '--- Repository state ---'
+    git = d['git']
+    if git['enabled']
+      puts "Branch: #{git['branch'] || '(detached)'}"
+      puts "Upstream: #{git['upstream'] || '(none)'}"
+      if git['ahead_behind']
+        puts "Ahead/Behind upstream: ahead=#{git['ahead_behind']['ahead']} behind=#{git['ahead_behind']['behind']}"
+      end
+      puts "Working tree: #{git['working_tree_clean'] ? 'clean' : "dirty (#{git['pending_changes'].length} pending)"}"
+      unless git['working_tree_clean']
+        git['pending_changes'].first(10).each { |line| puts "  #{line}" }
+        puts "  ... (#{git['pending_changes'].length - 10} more)" if git['pending_changes'].length > 10
+      end
+      puts "Remotes: #{git['remotes'].empty? ? 'none' : git['remotes'].join(', ')}"
+      puts "Last commit: #{git['last_commit']}" if git['last_commit']
+    else
+      puts 'git: disabled (PHASE_CONTRACT_ALLOW_NON_GIT=1 or non-git workspace)'
+    end
+    puts
+    puts '--- Health checks ---'
+    d['health']['notes'].each { |n| puts "note:  #{n}" }
+    if d['health']['issues'].empty?
+      puts 'ok:    no doctor-level issues detected'
+    else
+      d['health']['issues'].each { |i| puts "issue: #{i}" }
+    end
+    puts
+    puts '--- Recommended human next steps ---'
+    d['recommended_next_steps'].each_with_index do |rec, idx|
+      puts "#{idx + 1}. #{rec}"
+    end
+    puts
+    puts 'Reminder for the AI: render this dashboard verbatim to the human, layer your own deep review on top, and stop. Do not auto-execute the recommendations — they are deliberate human decision points.'
+  end
+
   def load_yaml(path)
     YAML.safe_load(File.read(path), permitted_classes: [], aliases: false) || {}
   rescue Psych::SyntaxError => error
@@ -1142,6 +1451,7 @@ def usage
       ruby scripts/planctl handoff [--format prompt|json] [--write]
       ruby scripts/planctl resume [--strict]
       ruby scripts/planctl doctor
+      ruby scripts/planctl finalize [--format text|json]
   USAGE
 end
 
@@ -1252,6 +1562,18 @@ when 'doctor'
     exit 1
   end
   planctl.doctor
+when 'finalize'
+  options = { format: 'text' }
+  parser = OptionParser.new do |opts|
+    opts.banner = usage
+    opts.on('--format FORMAT', 'text or json') { |value| options[:format] = value }
+  end
+  parser.parse!(ARGV)
+  if ARGV.any?
+    warn parser.to_s
+    exit 1
+  end
+  planctl.finalize(format: options[:format])
 else
   warn usage
   exit 1
