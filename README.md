@@ -21,11 +21,38 @@ Model any long project as an **ordered chain of contracts**: progress, dependenc
 
 ---
 
-**Quick links**: [Install](#install--update) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Documentation](#documentation-map)
+**Quick links**: [Recommended scenarios](#recommended-scenarios) · [Install](#install--update) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Documentation](#documentation-map)
 
 ## Why
 
 Any AI Agent running continuously for 3+ hours will reliably hit four failure modes: **progress drift, scope creep, goal amnesia, and compression amnesia**. Writing a longer and more detailed `Plan.md` and trusting the model to self-police will still break at hour 2-3. This project shuts those failures down with **mechanism**, not with discipline.
+
+## Recommended scenarios
+
+Use this Skill when you want an AI Agent to do more than patch one small issue: you want it to keep moving through a multi-hour or multi-day project without losing the thread.
+
+It fits especially well when you are doing:
+
+- **Large refactors and migrations**: framework upgrades, SDK replacements, module rewrites. The workflow splits work into dependency-aware phases so the Agent only edits inside the current boundary.
+- **New product builds**: infrastructure first, then data layer, services, UI, tests, and release. Every step gets a contract, acceptance checks, and a rollback-friendly milestone.
+- **Long-form documentation work**: technical manuals, research reports, course material. Chapters, review passes, formatting, and final delivery stay separate instead of being remembered through chat history.
+- **Compliance, security, or data-governance remediation**: access control, audit logs, encryption, schema rebuilds. Each control becomes part of an auditable execution ledger.
+- **Autonomous continuation**: after each phase, `complete --continue` chains into `advance --strict`, so the Agent keeps going, promotes placeholder contracts when needed, enters finalization when done, and only stops for real blockers.
+
+The result is not a chatty "I think I finished" report. You get a repo-backed execution system: `plan/state.yaml` records completed phases, `plan/handoff.md` preserves recovery context, git milestones show what changed at each step, and `finalize` returns the release / archive / review decisions to you.
+
+The simplest way to start is to tell the Agent:
+
+```text
+Plan and continuously execute this project with Phase-Contract: <your project goal>
+```
+
+Once a plan exists, the daily loop is:
+
+```bash
+ruby scripts/planctl advance --strict
+ruby scripts/planctl complete <phase-id> --summary "..." --next-focus "..." --continue
+```
 
 ## Core idea
 
@@ -85,9 +112,9 @@ Once installed, just tell the Agent "plan XXX with Phase-Contract" in any sessio
 Every Phase runs the same loop. You can compress or swap sessions at any breakpoint - re-entering from the top loses nothing.
 
 ```text
-next --strict  →  load 3 docs  →  execute (within execution boundary)
+advance --strict  →  load 3 docs  →  execute (within execution boundary)
                                            ↓
-                    ← handoff (by script) ← complete <id>
+                    ← handoff (by script) ← complete <id> --continue
                                            ↓
                               (all phases done) → finalize
 ```
@@ -95,14 +122,14 @@ next --strict  →  load 3 docs  →  execute (within execution boundary)
 A single command kicks off, resumes, or wraps up:
 
 ```bash
-ruby scripts/planctl next --format prompt --strict     # new session / daily driver
+ruby scripts/planctl advance --strict                  # new session / daily driver
 ruby scripts/planctl resume --strict                   # cold start after compression
-ruby scripts/planctl complete <id> --summary "..." --next-focus "..."
+ruby scripts/planctl complete <id> --summary "..." --next-focus "..." --continue
 ruby scripts/planctl finalize                          # whole-plan close-out dashboard (only after every phase is done)
 ruby scripts/planctl doctor                            # repo health check (SHA256-diff the three instruction files, etc.)
 ```
 
-Phase boundaries are internal, not user confirmation points. After `complete`, immediately rerun `next --strict`; if the new current Phase is still a placeholder pair, promote both contracts to formal docs first. When `next` reports every Phase done, do **not** declare the project finished — run `finalize` to print the final execution dashboard and hand release / tag / archive decisions back to a human. Details live in [references/phase-templates.md](./references/phase-templates.md) and [references/workflow-template.md](./references/workflow-template.md).
+Phase boundaries are internal, not user confirmation points. `complete --continue` immediately chains into `advance --strict`; if the new current Phase is still a placeholder pair, `advance` returns `ACTION: promote_placeholder`, so promote both contracts to formal docs first. When `advance` returns `ACTION: finalize`, do **not** declare the project finished — run `finalize` to print the final execution dashboard and hand release / tag / archive decisions back to a human. Details live in [references/phase-templates.md](./references/phase-templates.md) and [references/workflow-template.md](./references/workflow-template.md).
 
 ## Design principles
 
@@ -149,7 +176,7 @@ When used as an Agent Skill, just say "plan XXX with Phase-Contract" inside Copi
 
 For manual installation into an existing project, copy `scripts/planctl.rb` in and generate the rest from the templates - details in [SKILL.md](./SKILL.md).
 
-Only the current Phase needs a formal contract on day one. Future Phases can stay as placeholder pairs until entry, then be promoted when `next --strict` reaches them.
+Only the current Phase needs a formal contract on day one. Future Phases can stay as placeholder pairs until entry, then be promoted when `advance --strict` returns `ACTION: promote_placeholder`.
 
 ## Roadmap
 

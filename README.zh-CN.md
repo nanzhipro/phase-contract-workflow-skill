@@ -21,11 +21,38 @@
 
 ---
 
-**快速导航**：[安装](#install--update) · [快速开始](#quick-start) · [工作原理](#how-it-works) · [文档索引](#documentation-map)
+**快速导航**：[推荐场景](#推荐场景) · [安装](#install--update) · [快速开始](#quick-start) · [工作原理](#how-it-works) · [文档索引](#documentation-map)
 
 ## Why
 
 AI 连续工作 3 小时以上会稳定出现四类失败：**进度漂移、边界越界、目标遗忘、压缩失忆**。写一份越长越详细的 `Plan.md` 让 AI 自己判断，到 2-3 小时必崩。本项目用**机制**而非**自觉**封堵这四类失败。
+
+## Recommended scenarios
+
+如果你已经不满足于让 AI “帮我改一个小功能”，而是想让它连续推进一个需要数小时甚至数天拆解的大项目，这个 Skill 就是为你准备的。
+
+你可以在这些场景里使用它：
+
+- **大型重构 / 迁移**：例如框架升级、SDK 替换、模块重写。它会把任务拆成有依赖的 phase，让 AI 每次只改当前边界内的文件，避免越改越散。
+- **从 0 到 1 搭产品**：例如先搭基础设施，再做数据层、服务层、界面、测试和发布。它会让每一步都有合同、验收和回滚点，而不是靠聊天记录记进度。
+- **长文档 / 课程 / 报告工程**：例如一本技术手册、系列研究报告或课程讲义。它会把章节、审校、格式化、交付拆开，避免后期忘掉前面的风格和约束。
+- **合规、安全、数据治理整改**：例如访问控制、日志审计、加密、schema 重建。它会把控制项变成可追踪的执行账本，方便复盘和审计。
+- **你想让 AI 一口气继续做下去**：每个 phase 完成后，`complete --continue` 会接上 `advance --strict`，自动判断下一步是继续实施、升级占位合同、进入收尾，还是遇到真实 blocker 才停下来找你。
+
+用完之后，你得到的不是一份“AI 觉得自己做完了”的口头汇报，而是一套落在仓库里的执行系统：`plan/state.yaml` 记录哪些 phase 真的完成，`plan/handoff.md` 记录压缩后怎么恢复，git 里程碑记录每一步改了什么，`finalize` 最后把项目仪表盘和发版 / 归档 / 审阅等决策点交还给你。
+
+最简单的用法是在 Agent 里直接说：
+
+```text
+用 Phase-Contract 规划并连续推进这个项目：<你的项目目标>
+```
+
+如果项目已经生成了 plan，日常推进只需要遵循：
+
+```bash
+ruby scripts/planctl advance --strict
+ruby scripts/planctl complete <phase-id> --summary "..." --next-focus "..." --continue
+```
 
 ## Core idea
 
@@ -85,9 +112,9 @@ npx skills remove phase-contract-workflow -g
 每个 Phase 走同一条环路；中断点随时可以压缩或换会话，下轮从起点重入即可无损续跑：
 
 ```text
-next --strict  →  读 3 份上下文  →  实施（守 execution 边界）
+advance --strict  →  读 3 份上下文  →  实施（守 execution 边界）
                                              ↓
-                       ← handoff (脚本自动)  ←  complete <id>
+                       ← handoff (脚本自动)  ←  complete <id> --continue
                                              ↓
                                   （全部完成）→ finalize
 ```
@@ -95,14 +122,14 @@ next --strict  →  读 3 份上下文  →  实施（守 execution 边界）
 一条命令即可启动、恢复或收尾：
 
 ```bash
-ruby scripts/planctl next --format prompt --strict     # 新会话 / 日常推进
+ruby scripts/planctl advance --strict                  # 新会话 / 日常推进
 ruby scripts/planctl resume --strict                   # 压缩后冷启动
-ruby scripts/planctl complete <id> --summary "..." --next-focus "..."
+ruby scripts/planctl complete <id> --summary "..." --next-focus "..." --continue
 ruby scripts/planctl finalize                          # 全计划收尾仪表盘（仅在所有 phase 完成后可用）
 ruby scripts/planctl doctor                            # 仓库体检（三份指令 SHA256 比对等）
 ```
 
-phase 边界是内部动作，不是用户确认点。`complete` 之后要立刻再跑一次 `next --strict`；如果新 current phase 仍是占位合同，先把两份合同升级成正式文档，再继续实现。当 `next` 报告全部 phase 已完成，**不要**直接对用户宣告项目结束——跑一次 `finalize` 输出最终执行仪表盘，把发版 / 打 tag / 归档 `plan/` 等决策点交还人类。细节见 [references/phase-templates.md](./references/phase-templates.md) 与 [references/workflow-template.md](./references/workflow-template.md)。
+phase 边界是内部动作，不是用户确认点。`complete --continue` 会自动接上 `advance --strict`；如果新 current phase 仍是占位合同，`advance` 返回 `ACTION: promote_placeholder`，先把两份合同升级成正式文档，再继续实现。当 `advance` 返回 `ACTION: finalize`，**不要**直接对用户宣告项目结束——跑一次 `finalize` 输出最终执行仪表盘，把发版 / 打 tag / 归档 `plan/` 等决策点交还人类。细节见 [references/phase-templates.md](./references/phase-templates.md) 与 [references/workflow-template.md](./references/workflow-template.md)。
 
 ## Design principles
 
@@ -149,7 +176,7 @@ phase 边界是内部动作，不是用户确认点。`complete` 之后要立刻
 
 手工安装脚手架到已有项目时，直接把 `scripts/planctl.rb` 复制过去并按模板生成其他文件即可；细节见 [SKILL.md](./SKILL.md)。
 
-初次搭建时只需要把当前 phase 写成正式合同；future phase 可以先保留成对占位合同，等 `next --strict` 真正走到那里时再升级。
+初次搭建时只需要把当前 phase 写成正式合同；future phase 可以先保留成对占位合同，等 `advance --strict` 返回 `ACTION: promote_placeholder` 时再升级。
 
 ## Roadmap
 

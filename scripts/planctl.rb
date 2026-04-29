@@ -119,7 +119,7 @@ class PlanCtl
     end
   end
 
-  def complete(phase_id, summary:, next_focus:)
+  def complete(phase_id, summary:, next_focus:, continue_run: false)
     ensure_git_repo!
     if blank?(summary)
       warn "Cannot complete #{phase_id}: --summary is required and must be non-empty."
@@ -188,10 +188,15 @@ class PlanCtl
     # does not have to re-derive it from the manifest.
     next_phase = first_remaining_phase(ordered)
     if next_phase
-      puts "Next phase: #{next_phase['id']} (#{next_phase['title']}). Run: ruby scripts/planctl next --format prompt --strict"
+      puts "Next phase: #{next_phase['id']} (#{next_phase['title']}). Run: ruby scripts/planctl advance --strict"
     else
       puts 'All phases are completed. No remaining work.'
       puts 'Final step: run `ruby scripts/planctl finalize` to print the final execution dashboard and recommended human next steps.'
+    end
+
+    if continue_run || autonomous_continuation?
+      puts
+      advance(format: 'prompt', strict: true)
     end
   end
 
@@ -202,7 +207,7 @@ class PlanCtl
   #      entry to completion_log so the ledger reflects reality.
   #   4. Rewrite state.yaml + handoff.md, then push the new history.
   # The phase itself is NOT marked "to redo" — if you want to redo it, run
-  # `planctl next --strict` afterwards; the dependency graph will put it
+  # `planctl advance --strict` afterwards; the dependency graph will put it
   # back on the queue.
   def revert(phase_id, mode:, summary:)
     ensure_git_repo!
@@ -334,8 +339,8 @@ class PlanCtl
 
   # Cold-start macro: prints everything an AI agent needs to resume work
   # after a compression / fresh session. Combines manifest overview,
-  # handoff snapshot, and the `next` resolve result in one shot so the
-  # agent does not have to orchestrate multiple calls.
+  # handoff snapshot, and the autonomous `advance` result in one shot so
+  # the agent does not have to orchestrate multiple calls.
   def resume(strict:)
     warn_if_not_git_repo
     state = load_state
@@ -354,16 +359,21 @@ class PlanCtl
     puts "--- Handoff snapshot ---"
     render_handoff(snapshot, 'prompt')
     puts
-    puts "--- Next phase ---"
-    phase = snapshot['next_phase'] && fetch_phase(snapshot['next_phase']['phase_id'])
-    if phase
-      result = build_resolve_result(phase, state)
-      render_resolve(result, 'prompt')
-      exit(2) if strict && !result['ready']
-    else
-      puts 'All phases are completed. Nothing to resume.'
-      puts 'Final step: run `ruby scripts/planctl finalize` to print the final execution dashboard and recommended human next steps.'
-    end
+    puts '--- Next action ---'
+    result = build_advance_result(state)
+    render_advance(result, 'prompt')
+    exit(2) if strict && result['action'] == 'stop'
+  end
+
+  # Autonomous continuation state machine. Unlike `next --strict`, placeholder
+  # contracts are not treated as a blocker here: they become an internal
+  # Golden-Loop action (`promote_placeholder`) so agents keep moving without
+  # asking the user for phase-boundary confirmation.
+  def advance(format:, strict:)
+    ensure_git_repo!
+    result = build_advance_result(load_state)
+    render_advance(result, format)
+    exit(2) if strict && result['action'] == 'stop'
   end
 
   # Repository integrity checker. Returns exit 0 when healthy, 2 when
@@ -429,7 +439,7 @@ class PlanCtl
         end
       end
     else
-      warnings << 'state.yaml not created yet; run `planctl next --strict` or complete a phase.' if handoff_path.file?
+      warnings << 'state.yaml not created yet; run `planctl advance --strict` or complete a phase.' if handoff_path.file?
     end
 
     instruction_files = %w[.github/copilot-instructions.md CLAUDE.md AGENTS.md]
@@ -481,7 +491,7 @@ class PlanCtl
 
     unless remaining.empty?
       warn "Cannot finalize: #{remaining.length} phase(s) still pending — #{remaining.map { |p| p['id'] }.join(', ')}."
-      warn '[planctl] finalize only runs after every manifest phase is in state.yaml. Run `ruby scripts/planctl next --format prompt --strict` to resume.'
+      warn '[planctl] finalize only runs after every manifest phase is in state.yaml. Run `ruby scripts/planctl advance --strict` to resume.'
       exit 2
     end
 
@@ -515,7 +525,7 @@ class PlanCtl
     return if git_work_tree?
 
     warn '[planctl] warning: current directory is not a git work tree.'
-    warn "[planctl] warning: `next` / `resolve` / `complete` / `handoff` will refuse to run (exit #{GIT_GUARD_EXIT_CODE}) until a git baseline exists."
+    warn "[planctl] warning: `advance` / `next` / `resolve` / `complete` / `handoff` will refuse to run (exit #{GIT_GUARD_EXIT_CODE}) until a git baseline exists."
     warn "[planctl] warning: see `plan/workflow.md` for the `git init` instructions or set #{GIT_OPT_OUT_ENV}=1 to opt out explicitly."
   end
 
@@ -752,6 +762,56 @@ class PlanCtl
     }
   end
 
+  def build_advance_result(state)
+    completed = Array(state['completed_phases'])
+    phase = first_remaining_phase(completed)
+    continuation = continuation_policy
+
+    unless phase
+      return {
+        'action' => 'finalize',
+        'stop_reason' => 'all_phases_completed',
+        'phase' => nil,
+        'required_context' => [],
+        'continuation' => continuation,
+        'finalize_command' => 'ruby scripts/planctl finalize',
+        'message' => 'All phases are completed. Run finalize, then stop for human release/archive decisions.'
+      }
+    end
+
+    resolve = build_resolve_result(phase, state)
+    blockers = []
+    blockers << 'dependency_missing' unless Array(resolve['missing_dependencies']).empty?
+    blockers << 'missing_context' unless Array(resolve['missing_context_files']).empty?
+
+    action = if blockers.any?
+               'stop'
+             elsif !Array(resolve['placeholder_contract_files']).empty?
+               'promote_placeholder'
+             else
+               'implement'
+             end
+
+    stop_reason = blockers.empty? ? 'none' : blockers.join(', ')
+
+    {
+      'action' => action,
+      'stop_reason' => stop_reason,
+      'phase' => {
+        'phase_id' => resolve['phase_id'],
+        'title' => resolve['title'],
+        'plan_file' => resolve['plan_file'],
+        'execution_file' => resolve['execution_file']
+      },
+      'required_context' => resolve['required_context'],
+      'missing_dependencies' => resolve['missing_dependencies'],
+      'missing_context_files' => resolve['missing_context_files'],
+      'placeholder_contract_files' => resolve['placeholder_contract_files'],
+      'continuation' => continuation,
+      'next_command' => 'ruby scripts/planctl advance --strict'
+    }
+  end
+
   def build_status_result(state)
     completed = Array(state['completed_phases'])
     phases = manifest_phases
@@ -897,6 +957,57 @@ class PlanCtl
       puts "State file: #{result['state_file']}"
       puts "Handoff file: #{result['handoff_file']}"
       puts 'Final step: run `ruby scripts/planctl finalize` to print the final execution dashboard and recommended human next steps.'
+    end
+  end
+
+  def render_advance(result, format)
+    case format
+    when 'json'
+      puts JSON.pretty_generate(result)
+    else
+      puts '=== Phase-Contract Advance ==='
+      puts "ACTION: #{result['action']}"
+      puts "STOP_REASON: #{result['stop_reason']}"
+      puts "Continuation mode: #{result.dig('continuation', 'mode') || 'manual'}"
+      puts
+
+      if result['phase']
+        puts "PHASE: #{result['phase']['phase_id']} #{result['phase']['title']}"
+        puts "Plan: #{result['phase']['plan_file']}"
+        puts "Execution: #{result['phase']['execution_file']}"
+        puts
+      end
+
+      case result['action']
+      when 'implement'
+        puts 'Read these files in order before making changes:'
+        result['required_context'].each_with_index do |path, index|
+          puts "#{index + 1}. #{path}"
+        end
+        puts
+        puts 'Next internal action: implement this phase now. Do not ask for phase-boundary confirmation.'
+      when 'promote_placeholder'
+        puts 'Placeholder contracts to upgrade before implementation:'
+        result['placeholder_contract_files'].each { |path| puts "- #{path}" }
+        puts
+        puts 'Next internal actions:'
+        puts '1. Upgrade both phase and execution contracts to formal, objective contracts.'
+        puts '2. Rerun `ruby scripts/planctl advance --strict`.'
+        puts '3. Start implementation only when ACTION becomes implement.'
+        puts
+        puts 'This is a Golden-Loop internal action, not a user confirmation point.'
+      when 'finalize'
+        puts result['message']
+        puts "NEXT_COMMAND: #{result['finalize_command']}"
+      when 'stop'
+        puts 'Blockers:'
+        puts "- missing dependencies: #{format_list(result['missing_dependencies'])}"
+        puts "- missing context files: #{format_list(result['missing_context_files'])}"
+        puts
+        puts 'Stop and report this blocker before editing files.'
+      else
+        puts 'Unknown action. Stop and inspect planctl output.'
+      end
     end
   end
 
@@ -1169,6 +1280,14 @@ class PlanCtl
 
   def compression_rules
     Array(@manifest.dig('execution_rule', 'compression_control', 'rules'))
+  end
+
+  def continuation_policy
+    @manifest.dig('execution_rule', 'continuation') || {}
+  end
+
+  def autonomous_continuation?
+    continuation_policy['mode'].to_s == 'autonomous'
   end
 
   # ---- finalize helpers ---------------------------------------------------
@@ -1445,8 +1564,9 @@ def usage
     Usage:
       ruby scripts/planctl resolve <phase-id> [--format prompt|json|paths] [--strict]
       ruby scripts/planctl next [--format prompt|json|paths] [--strict]
+      ruby scripts/planctl advance [--format prompt|json] [--strict]
       ruby scripts/planctl status [--format text|json]
-      ruby scripts/planctl complete <phase-id> [--summary TEXT] [--next-focus TEXT]
+      ruby scripts/planctl complete <phase-id> [--summary TEXT] [--next-focus TEXT] [--continue]
       ruby scripts/planctl revert <phase-id> [--mode revert|reset] [--summary TEXT]
       ruby scripts/planctl handoff [--format prompt|json] [--write]
       ruby scripts/planctl resume [--strict]
@@ -1489,6 +1609,19 @@ when 'next'
     exit 1
   end
   planctl.next_phase(format: options[:format], strict: options[:strict])
+when 'advance'
+  options = { format: 'prompt', strict: false }
+  parser = OptionParser.new do |opts|
+    opts.banner = usage
+    opts.on('--format FORMAT', 'prompt or json') { |value| options[:format] = value }
+    opts.on('--strict', 'Exit non-zero only for real blockers; placeholder promotion remains an internal action') { options[:strict] = true }
+  end
+  parser.parse!(ARGV)
+  if ARGV.any?
+    warn parser.to_s
+    exit 1
+  end
+  planctl.advance(format: options[:format], strict: options[:strict])
 when 'status'
   options = { format: 'text' }
   parser = OptionParser.new do |opts|
@@ -1502,11 +1635,12 @@ when 'status'
   end
   planctl.status(format: options[:format])
 when 'complete'
-  options = { summary: nil, next_focus: nil }
+  options = { summary: nil, next_focus: nil, continue: false }
   parser = OptionParser.new do |opts|
     opts.banner = usage
     opts.on('--summary TEXT', 'Concise completion summary to persist for resume') { |value| options[:summary] = value }
     opts.on('--next-focus TEXT', 'Concise note about what should happen next') { |value| options[:next_focus] = value }
+    opts.on('--continue', 'Resolve the next internal action immediately after completion') { options[:continue] = true }
   end
   parser.parse!(ARGV)
   phase_id = ARGV.shift
@@ -1514,7 +1648,7 @@ when 'complete'
     warn parser.to_s
     exit 1
   end
-  planctl.complete(phase_id, summary: options[:summary], next_focus: options[:next_focus])
+  planctl.complete(phase_id, summary: options[:summary], next_focus: options[:next_focus], continue_run: options[:continue])
 when 'revert'
   options = { mode: 'revert', summary: nil }
   parser = OptionParser.new do |opts|

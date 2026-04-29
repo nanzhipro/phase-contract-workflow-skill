@@ -119,7 +119,7 @@
 当 manifest 需要提前引用未来 phase 的 `plan_file` / `execution_file`，但当前还没进入该 phase 时，先为这一对文件写**占位合同**。作用有两点：
 
 - 让 `planctl doctor` 能验证 manifest 引用的文件存在
-- 让 `planctl next --strict` / `resolve --strict` 在该 phase 变成当前 phase 时，因为仍是占位合同而 exit 2，逼 agent 先补正式合同
+- 让 `planctl advance --strict` 在该 phase 变成当前 phase 时返回 `ACTION: promote_placeholder`，逼 agent 先补正式合同，但不把 phase 边界变成用户确认点
 
 ### 3.1 占位定位合同
 
@@ -153,8 +153,8 @@
 
 ### 3.3 占位合同铁律
 
-- `PHASE_CONTRACT_PLACEHOLDER` 必须保留在文件前 40 行，直到正式合同写完再删除；`planctl --strict` 靠它阻断误实施
-- phase 真轮到当前时，先同时升级 `phases/*` 和 `execution/*`，再 rerun `next --strict` / `resolve --strict`
+- `PHASE_CONTRACT_PLACEHOLDER` 必须保留在文件前 40 行，直到正式合同写完再删除；`planctl advance --strict` 靠它输出 `ACTION: promote_placeholder` 阻断误实施
+- phase 真轮到当前时，先同时升级 `phases/*` 和 `execution/*`，再 rerun `advance --strict`
 - 不要只升级一份；单边升级会让边界和目标失步
 
 ---
