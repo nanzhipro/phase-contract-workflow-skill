@@ -73,7 +73,7 @@ argument-hint: "(optional) target project path and short project description"
 | P6  | 完成即写入     | `complete` 原子写回 `state.yaml` 与 `handoff.md`，缺一不进下一圈                                     |
 | P7  | 固定恢复协议   | 压缩后永远三步：manifest → handoff → next                                                            |
 | P8  | 里程碑外部化   | `complete` 自动 `git add/commit/push`；有 remote 时形成远端记录，无 remote 时保留本地可回滚里程碑    |
-| P9  | 显式整体收尾   | 全部 phase 完成后必须跑 `planctl finalize` 输出最终仪表盘并把决策权交还人类，AI 不得自行宣告项目结束 |
+| P9  | 显式整体收尾   | 全部 phase 完成后必须跑 `planctl finalize`；首次成功执行会写 `finalized_at`、刷新 handoff、自动 git 收尾，再把最终仪表盘和决策权交还人类 |
 
 ## Procedure
 
@@ -253,13 +253,16 @@ AI 必须立刻执行的动作（连续执行，不需要用户确认）：
 ruby scripts/planctl finalize
 ```
 
-`finalize` 仅在 `state.yaml` 已包含 manifest 中全部 phase 时才会运行，否则以 exit 2 拒绝（防止半成品 plan 被误收尾）。它一次性聚合：
+`finalize` 仅在 `state.yaml` 已包含 manifest 中全部 phase 时才会运行，否则以 exit 2 拒绝（防止半成品 plan 被误收尾）。首次成功执行时，它会先写 `plan/state.yaml.finalized_at`、刷新 `plan/handoff.md`、执行 `git add -A` → `git commit -F -` → `git push`，然后再输出最终执行仪表盘。若 commit 或 push 失败，只打印 warning，不回滚 ledger。若 `finalized_at` 已存在，后续重复 `finalize` 保持只读：不重写 ledger、不再次 commit/push，只重新生成仪表盘。
+
+最终执行仪表盘会一次性聚合：
 
 1. **项目总览**：phase 总数 / 完成数、首末完成时间戳、累计 elapsed。
-2. **Phase 台账**：每个 phase 的 id、标题、completed_at、summary、next_focus，以及 `git log --grep "Phase-Id: <id>"` 找到的里程碑 commit SHA。找不到的 phase 会被显式标出，提示人工对账。
-3. **仓库状态**：当前分支、upstream、ahead/behind、工作树是否干净、未提交文件清单（截断到前 10 条）、配置的 remotes、最近一次 commit。
-4. **Health 检查**：manifest → plan_file/execution_file 引用是否还存在、`state.yaml` 中的 phase id 是否都在 manifest 里、三份 agent 指令（Copilot / CLAUDE / AGENTS）是否仍然 SHA256 一致。issue 与 note 分开列。
-5. **Recommended human next steps**：基于上面四块自动推导，例如有未推送 commit 就提示 `git push`、没有 remote 就提示先 `git remote add origin`、有 phase 缺 summary 就提示补叙述，并附上一组**通用收尾动作**（端到端验收、人类 code review、决定是否打 release tag、归档 `plan/`、写对外交付说明、把发版/维护决策交还人类）。
+2. **Finalized at**：最终 ledger 写入时间戳。
+3. **Phase 台账**：每个 phase 的 id、标题、completed_at、summary、next_focus，以及 `git log --grep "Phase-Id: <id>"` 找到的里程碑 commit SHA。找不到的 phase 会被显式标出，提示人工对账。
+4. **仓库状态**：当前分支、upstream、ahead/behind、工作树是否干净、未提交文件清单（截断到前 10 条）、配置的 remotes、最近一次 commit。
+5. **Health 检查**：manifest → plan_file/execution_file 引用是否还存在、`state.yaml` 中的 phase id 是否都在 manifest 里、三份 agent 指令（Copilot / CLAUDE / AGENTS）是否仍然 SHA256 一致。issue 与 note 分开列。
+6. **Recommended human next steps**：基于上面五块自动推导，例如有未推送 commit 就提示 `git push`、没有 remote 就提示先 `git remote add origin`、有 phase 缺 summary 就提示补叙述，并附上一组**通用收尾动作**（端到端验收、人类 code review、决定是否打 release tag、归档 `plan/`、写对外交付说明、把发版/维护决策交还人类）。
 
 拿到 finalize 输出后，AI **必须再做一次深入审视**，不要原样转发：
 
@@ -275,7 +278,7 @@ ruby scripts/planctl finalize
 - 是否安排长期维护、轮值或回归测试
 - 是否需要安全 / 合规 / 法务审阅
 
-在人类未明确指示之前，AI 不得 `git tag` / 推 tag / 删除或移动 `plan/` / 重跑本 Skill 脚手架 / 继续修改 `state.yaml`。若 finalize 的 health 报告了 issue，按 Step 7 的"中止条件"逻辑先汇报由人类决定是先修问题再收尾还是接受现状收尾。重复 `finalize` 无副作用但应避免当 status 用。
+即便首次 `finalize` 会自动 commit/push finalization ledger，在人类未明确指示之前，AI 仍不得 `git tag` / 推 tag / 删除或移动 `plan/` / 重跑本 Skill 脚手架 / 继续修改 `state.yaml`。若 finalize 的 health 报告了 issue，按 Step 7 的"中止条件"逻辑先汇报由人类决定是先修问题再收尾还是接受现状收尾。重复 `finalize` 无副作用但应避免当 status 用。
 
 ## Decision Points
 
@@ -320,7 +323,7 @@ ruby scripts/planctl finalize
 - [ ] 当某个 future phase 仍是占位合同且它变成 current phase 时，`planctl advance --strict` 会返回 `ACTION: promote_placeholder`，直到两份合同被升级
 - [ ] 首次 `complete` 前若仓库已出现未跟踪中间产物，AI 已基于可再生性、交付边界与项目约定自行判断并更新根目录 `.gitignore`，且不会把这些产物带进里程碑提交
 - [ ] 若目标项目已配置 `git remote`，其当前分支可推送；若暂时无 remote，已在对用户的交付说明里明确说明：后续 `complete` 将仅本地 commit、跳过 push，但**不阻塞**继续执行后续任务
-- [ ] `scripts/planctl finalize` 在 phase 尚未全部完成时以 exit 2 拒绝运行；当且仅当 `state.yaml` 包含全部 manifest phase 时才打印仪表盘
+- [ ] `scripts/planctl finalize` 在 phase 尚未全部完成时以 exit 2 拒绝运行；首次成功执行会写 `finalized_at`、刷新 `handoff.md`、尝试自动 commit/push，重复执行保持只读且仍可打印仪表盘
 - [ ] 三份 agent 指令均含 §十二「整体收尾规约（Finalization）」，且禁止行为里明确不得跳过 `finalize` 自行宣告项目结束
 
 ## References

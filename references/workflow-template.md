@@ -255,9 +255,21 @@ ruby scripts/planctl advance --strict
 ruby scripts/planctl finalize
 ```
 
-`finalize` 只在 `state.yaml` 已包含全部 manifest phase 时才会运行（否则 exit 2），它会一次性聚合：
+`finalize` 只在 `state.yaml` 已包含全部 manifest phase 时才会运行（否则 exit 2）。首次成功执行时，它会先按以下顺序写入最终 ledger，再输出仪表盘：
 
-- 项目总览（phase 总数、完成数、首/末完成时间、累计 elapsed）
+- 写入 `plan/state.yaml.finalized_at`（UTC ISO8601）
+- 同步刷新 `plan/state.yaml.updated_at`
+- 刷新 `plan/handoff.md`
+- 执行最终 git 收尾：`git add -A` → `git commit -F -` → `git push`
+- 最后打印最终执行仪表盘
+
+若 commit 或 push 失败，只打印 warning；**不会**回滚 `finalized_at`、`state.yaml` 或 `handoff.md`。若仓库没有 upstream，则回退到 `git push -u <remote> HEAD`；若没有任何 remote，则保留本地 finalization commit 并继续。
+
+一旦 `finalized_at` 已存在，后续重复 `finalize` 必须保持只读：不再重写 ledger、不再创建第二个 finalization commit、不再重复 push，只重新生成仪表盘。
+
+最终执行仪表盘会一次性聚合：
+
+- 项目总览（phase 总数、完成数、首/末完成时间、`Finalized at`、累计 elapsed）
 - Phase 台账（每个 phase 的标题、完成时间、summary、next_focus、对应里程碑 commit SHA）
 - 仓库状态（当前分支、upstream、ahead/behind、工作树是否干净、未推送 commit、最近 commit）
 - Health 检查（manifest 引用、state/handoff 一致性、三份 agent 指令 SHA256 对齐）
@@ -265,7 +277,7 @@ ruby scripts/planctl finalize
 
 AI 拿到 finalize 输出后，必须做一次**深入审视**：核对仪表盘与仓库实情是否一致、把通用建议翻译成本项目可执行的命令与责任人、识别 finalize 没显式列出但客观存在的风险（例如某个 phase 的 summary 与 diff 不符），并以**最终执行仪表盘**的形式向人类汇报。汇报最后必须显式把以下决策点交还人类：是否上线/发版、是否打 release tag、是否归档 `plan/`、是否安排长期维护、是否需要外部审阅。
 
-在人类没有显式指示之前，AI 不得自行 `git tag`、推 tag、删除/移动 `plan/`、开启下一轮规划或继续修改 `state.yaml`。这才算整个计划真正结束。
+即便 `finalize` 首次成功执行会自动 commit/push finalization ledger，在人类没有显式指示之前，AI 仍不得自行 `git tag`、推 tag、删除/移动 `plan/`、开启下一轮规划或继续修改 `state.yaml`。这才算整个计划真正结束。
 
 ## 如何在压缩或新会话后继续执行
 

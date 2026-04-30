@@ -4,6 +4,7 @@ require 'fileutils'
 require 'minitest/autorun'
 require 'open3'
 require 'tmpdir'
+require 'yaml'
 
 class PlanctlAutonomousTest < Minitest::Test
   REPO_ROOT = File.expand_path('..', __dir__)
@@ -83,6 +84,50 @@ class PlanctlAutonomousTest < Minitest::Test
     assert_includes out, 'ACTION: promote_placeholder'
   end
 
+  def test_finalize_first_run_records_ledger_and_creates_commit
+    complete_all_phases_with_skip_commit
+
+    out, err, status = run_planctl(
+      { 'PHASE_CONTRACT_SKIP_PUSH' => '1' },
+      'finalize'
+    )
+
+    assert status.success?, err
+    state = YAML.load_file(File.join(@repo, 'plan/state.yaml'))
+    refute_nil state['finalized_at']
+    refute_empty state['finalized_at']
+    assert_equal state['finalized_at'], state['updated_at']
+    handoff = File.read(File.join(@repo, 'plan/handoff.md'))
+    assert_includes handoff, "Finalized at: `#{state['finalized_at']}`"
+    assert_includes out, 'Finalized at:'
+    assert_includes out, 'chore(plan): finalize test-project execution'
+
+    log = git_output('log', '-n', '1', '--format=%s%n%b')
+    assert_includes log, 'chore(plan): finalize test-project execution'
+    assert_includes log, 'Finalized-At:'
+    assert_includes log, 'Automated-By: scripts/planctl finalize'
+  end
+
+  def test_finalize_second_run_is_read_only_after_finalized_at_exists
+    complete_all_phases_with_skip_commit
+    run_planctl({ 'PHASE_CONTRACT_SKIP_PUSH' => '1' }, 'finalize')
+    baseline_state = YAML.load_file(File.join(@repo, 'plan/state.yaml'))
+    baseline_handoff = File.read(File.join(@repo, 'plan/handoff.md'))
+    baseline_head = git_output('rev-parse', 'HEAD').strip
+
+    out, err, status = run_planctl(
+      { 'PHASE_CONTRACT_SKIP_PUSH' => '1' },
+      'finalize'
+    )
+
+    assert status.success?, err
+    assert_equal baseline_state, YAML.load_file(File.join(@repo, 'plan/state.yaml'))
+    assert_equal baseline_handoff, File.read(File.join(@repo, 'plan/handoff.md'))
+    assert_equal baseline_head, git_output('rev-parse', 'HEAD').strip
+    assert_includes out, 'Finalized at:'
+    refute_includes out, 'Committed finalization ledger'
+  end
+
   private
 
   def create_plan_files
@@ -144,6 +189,31 @@ class PlanctlAutonomousTest < Minitest::Test
   def run_planctl(*args)
     env = args.first.is_a?(Hash) ? args.shift : {}
     Open3.capture3(env, 'ruby', 'scripts/planctl', *args, chdir: @repo)
+  end
+
+  def complete_all_phases_with_skip_commit
+    out, err, status = run_planctl(
+      { 'PHASE_CONTRACT_SKIP_COMMIT' => '1' },
+      'complete', 'phase-0',
+      '--summary', 'Phase 0 done.',
+      '--next-focus', 'Start phase 1.'
+    )
+    raise "phase-0 complete failed: #{err}\n#{out}" unless status.success?
+
+    out, err, status = run_planctl(
+      { 'PHASE_CONTRACT_SKIP_COMMIT' => '1' },
+      'complete', 'phase-1',
+      '--summary', 'Phase 1 done.',
+      '--next-focus', 'Finalize execution.'
+    )
+    raise "phase-1 complete failed: #{err}\n#{out}" unless status.success?
+  end
+
+  def git_output(*args)
+    out, err, status = Open3.capture3('git', *args, chdir: @repo)
+    raise err unless status.success?
+
+    out
   end
 
   def git(*args)

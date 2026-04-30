@@ -188,9 +188,10 @@ version: 1
 completed_phases: []
 completion_log: []
 updated_at: null
+finalized_at: null
 ```
 
-**注意**：此文件由 `planctl complete` 写入，人类禁止手改。初始只需以上骨架。
+**注意**：此文件由 `planctl complete` 与首次成功的 `planctl finalize` 写入，人类禁止手改。`finalized_at` 在首次 finalize 成功写 ledger 时填充；重复 finalize 保持只读。
 
 ---
 
@@ -242,4 +243,4 @@ updated_at: null
 - handoff-repair (manual recovery only): `ruby scripts/planctl handoff --write`
 ```
 
-**注意**：`planctl handoff --write` 会以这个结构覆盖写入；它是**手动补救**命令，正常 Golden Loop 不需要额外调用，因为 `complete` 已自动刷新 handoff。初始手工留一份合格骨架只是为了首次 `advance` 之前可读。
+**注意**：`planctl handoff --write` 会以这个结构覆盖写入；它是**手动补救**命令，正常 Golden Loop 不需要额外调用，因为 `complete` 已自动刷新 handoff，而首次成功的 `finalize` 也会在写入 `finalized_at` 后自动刷新 handoff。初始手工留一份合格骨架只是为了首次 `advance` 之前可读。

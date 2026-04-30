@@ -39,7 +39,7 @@ It fits especially well when you are doing:
 - **Compliance, security, or data-governance remediation**: access control, audit logs, encryption, schema rebuilds. Each control becomes part of an auditable execution ledger.
 - **Autonomous continuation**: after each phase, `complete --continue` chains into `advance --strict`, so the Agent keeps going, promotes placeholder contracts when needed, enters finalization when done, and only stops for real blockers.
 
-The result is not a chatty "I think I finished" report. You get a repo-backed execution system: `plan/state.yaml` records completed phases, `plan/handoff.md` preserves recovery context, git milestones show what changed at each step, and `finalize` returns the release / archive / review decisions to you.
+The result is not a chatty "I think I finished" report. You get a repo-backed execution system: `plan/state.yaml` records completed phases and the finalization ledger, `plan/handoff.md` preserves recovery context, git milestones show what changed at each step, and the first successful `finalize` auto-records the final close-out before returning release / archive / review decisions to you.
 
 The simplest way to start is to tell the Agent:
 
@@ -125,11 +125,11 @@ A single command kicks off, resumes, or wraps up:
 ruby scripts/planctl advance --strict                  # new session / daily driver
 ruby scripts/planctl resume --strict                   # cold start after compression
 ruby scripts/planctl complete <id> --summary "..." --next-focus "..." --continue
-ruby scripts/planctl finalize                          # whole-plan close-out dashboard (only after every phase is done)
+ruby scripts/planctl finalize                          # first success writes finalization ledger + git close-out, then prints the dashboard
 ruby scripts/planctl doctor                            # repo health check (SHA256-diff the three instruction files, etc.)
 ```
 
-Phase boundaries are internal, not user confirmation points. `complete --continue` immediately chains into `advance --strict`; if the new current Phase is still a placeholder pair, `advance` returns `ACTION: promote_placeholder`, so promote both contracts to formal docs first. When `advance` returns `ACTION: finalize`, do **not** declare the project finished — run `finalize` to print the final execution dashboard and hand release / tag / archive decisions back to a human. Details live in [references/phase-templates.md](./references/phase-templates.md) and [references/workflow-template.md](./references/workflow-template.md).
+Phase boundaries are internal, not user confirmation points. `complete --continue` immediately chains into `advance --strict`; if the new current Phase is still a placeholder pair, `advance` returns `ACTION: promote_placeholder`, so promote both contracts to formal docs first. When `advance` returns `ACTION: finalize`, do **not** declare the project finished — the first successful `finalize` writes `finalized_at`, refreshes `plan/handoff.md`, runs `git add -A` → `git commit -F -` → `git push`, and only then prints the final execution dashboard. Later reruns stay read-only and only regenerate the dashboard. Details live in [references/phase-templates.md](./references/phase-templates.md) and [references/workflow-template.md](./references/workflow-template.md).
 
 ## Design principles
 
@@ -139,7 +139,7 @@ Phase boundaries are internal, not user confirmation points. `complete --continu
 - **Two-layer contract** - `phases/*` says _what it is_; `execution/*` says _what may be touched_ - goal and boundary kept orthogonal.
 - **Done means written** - a Phase that is not in `state.yaml` is not done, however eloquently the AI reports otherwise.
 - **Recovery is a first-class citizen** - `handoff.md` is a protocol, not a scratchpad.
-- **Close-out is explicit** - finishing the last Phase is not finishing the project; `finalize` produces the dashboard, the human makes the release call.
+- **Close-out is explicit** - finishing the last Phase is not finishing the project; the first successful `finalize` records the close-out ledger, later reruns stay read-only, and the human still makes the release call.
 
 Full eight principles, three invariants, failure model, and mitigation mapping: [references/methodology.md](./references/methodology.md).
 

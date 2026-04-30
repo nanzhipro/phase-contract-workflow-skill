@@ -39,7 +39,7 @@ AI 连续工作 3 小时以上会稳定出现四类失败：**进度漂移、边
 - **合规、安全、数据治理整改**：例如访问控制、日志审计、加密、schema 重建。它会把控制项变成可追踪的执行账本，方便复盘和审计。
 - **你想让 AI 一口气继续做下去**：每个 phase 完成后，`complete --continue` 会接上 `advance --strict`，自动判断下一步是继续实施、升级占位合同、进入收尾，还是遇到真实 blocker 才停下来找你。
 
-用完之后，你得到的不是一份“AI 觉得自己做完了”的口头汇报，而是一套落在仓库里的执行系统：`plan/state.yaml` 记录哪些 phase 真的完成，`plan/handoff.md` 记录压缩后怎么恢复，git 里程碑记录每一步改了什么，`finalize` 最后把项目仪表盘和发版 / 归档 / 审阅等决策点交还给你。
+用完之后，你得到的不是一份“AI 觉得自己做完了”的口头汇报，而是一套落在仓库里的执行系统：`plan/state.yaml` 记录哪些 phase 真的完成以及最终收尾 ledger，`plan/handoff.md` 记录压缩后怎么恢复，git 里程碑记录每一步改了什么，而首次成功的 `finalize` 会先落最终收尾记录，再把项目仪表盘和发版 / 归档 / 审阅等决策点交还给你。
 
 最简单的用法是在 Agent 里直接说：
 
@@ -125,11 +125,11 @@ advance --strict  →  读 3 份上下文  →  实施（守 execution 边界）
 ruby scripts/planctl advance --strict                  # 新会话 / 日常推进
 ruby scripts/planctl resume --strict                   # 压缩后冷启动
 ruby scripts/planctl complete <id> --summary "..." --next-focus "..." --continue
-ruby scripts/planctl finalize                          # 全计划收尾仪表盘（仅在所有 phase 完成后可用）
+ruby scripts/planctl finalize                          # 首次成功执行会写最终 ledger + git 收尾，然后输出全计划仪表盘
 ruby scripts/planctl doctor                            # 仓库体检（三份指令 SHA256 比对等）
 ```
 
-phase 边界是内部动作，不是用户确认点。`complete --continue` 会自动接上 `advance --strict`；如果新 current phase 仍是占位合同，`advance` 返回 `ACTION: promote_placeholder`，先把两份合同升级成正式文档，再继续实现。当 `advance` 返回 `ACTION: finalize`，**不要**直接对用户宣告项目结束——跑一次 `finalize` 输出最终执行仪表盘，把发版 / 打 tag / 归档 `plan/` 等决策点交还人类。细节见 [references/phase-templates.md](./references/phase-templates.md) 与 [references/workflow-template.md](./references/workflow-template.md)。
+phase 边界是内部动作，不是用户确认点。`complete --continue` 会自动接上 `advance --strict`；如果新 current phase 仍是占位合同，`advance` 返回 `ACTION: promote_placeholder`，先把两份合同升级成正式文档，再继续实现。当 `advance` 返回 `ACTION: finalize`，**不要**直接对用户宣告项目结束——首次成功的 `finalize` 会先写 `finalized_at`、刷新 `plan/handoff.md`、执行 `git add -A` → `git commit -F -` → `git push`，然后再输出最终执行仪表盘；后续重复执行保持只读，仅重新生成仪表盘。细节见 [references/phase-templates.md](./references/phase-templates.md) 与 [references/workflow-template.md](./references/workflow-template.md)。
 
 ## Design principles
 
@@ -139,7 +139,7 @@ phase 边界是内部动作，不是用户确认点。`complete --continue` 会�
 - **双层合同**：`phases/*` 说"是什么"，`execution/*` 说"能碰什么"，目标与边界正交。
 - **完成即事实**：未进 `state.yaml` 的 Phase 不视为完成，不管 AI 自述多么漂亮。
 - **恢复是一等公民**：`handoff.md` 不是备忘录，是协议。
-- **收尾要显式**：跑完最后一个 Phase 不等于项目结束；`finalize` 输出仪表盘，发版与否交由人类决定。
+- **收尾要显式**：跑完最后一个 Phase 不等于项目结束；首次成功的 `finalize` 会落最终 ledger，后续重复执行保持只读，而发版与否仍交由人类决定。
 
 完整的八原则、三不变量、失败模型与封堵映射，参见 [references/methodology.md](./references/methodology.md)。
 

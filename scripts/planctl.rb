@@ -500,6 +500,7 @@ class PlanCtl
       exit 2
     end
 
+    state = write_finalize_ledger_if_needed!(state)
     dashboard = build_finalize_dashboard(state)
 
     case format
@@ -654,6 +655,90 @@ class PlanCtl
     lines << "Next-Focus: #{next_focus.strip}" if next_focus && !next_focus.strip.empty?
     lines << 'Automated-By: scripts/planctl complete'
     lines.join("\n") + "\n"
+  end
+
+  def write_finalize_ledger_if_needed!(state)
+    finalized_at = state['finalized_at']
+    return state unless blank?(finalized_at.to_s)
+
+    timestamp = Time.now.utc.iso8601
+    new_state = state.merge(
+      'version' => state['version'] || STATE_SCHEMA_VERSION,
+      'finalized_at' => timestamp,
+      'updated_at' => timestamp
+    )
+
+    write_state(new_state)
+    write_handoff_file(new_state)
+    commit_and_push_finalization!(timestamp)
+    new_state
+  end
+
+  def commit_and_push_finalization!(finalized_at)
+    return if git_opt_out?
+    return unless git_work_tree?
+
+    if env_truthy?(SKIP_COMMIT_ENV)
+      puts "[planctl] #{SKIP_COMMIT_ENV} is set; skipping finalization commit and push."
+      return
+    end
+
+    unless run_git('add', '-A')
+      warn '[planctl] git add -A failed; finalization ledger not committed.'
+      return
+    end
+
+    if run_git('diff', '--cached', '--quiet')
+      puts '[planctl] Nothing to commit for finalization; ledger is already recorded in git.'
+      return
+    end
+
+    message = build_finalization_commit_message(finalized_at)
+    unless run_git_with_stdin(message, 'commit', '-F', '-')
+      warn "[planctl] git commit failed for finalization; #{state_file_relative} and #{handoff_file_relative} remain updated."
+      warn '[planctl] Resolve the commit manually (hooks, signing, identity) and commit the pending finalization ledger.'
+      return
+    end
+    puts '[planctl] Committed finalization ledger.'
+
+    if env_truthy?(SKIP_PUSH_ENV)
+      puts "[planctl] #{SKIP_PUSH_ENV} is set; skipping push. Finalization ledger is stored locally only."
+      return
+    end
+
+    push_finalization_ledger!
+  end
+
+  def build_finalization_commit_message(finalized_at)
+    project = @manifest['project']
+    project = @repo_root.basename.to_s if blank?(project.to_s)
+
+    lines = ["chore(plan): finalize #{project} execution", '']
+    lines << 'Record the finalization ledger after all manifest phases completed.'
+    lines << ''
+    lines << "Finalized-At: #{finalized_at}"
+    lines << 'Automated-By: scripts/planctl finalize'
+    lines.join("\n") + "\n"
+  end
+
+  def push_finalization_ledger!
+    remotes = capture_git('remote').split("\n").reject(&:empty?)
+    if remotes.empty?
+      warn '[planctl] No git remote configured; finalization ledger committed locally only, skipping push and continuing.'
+      warn "[planctl] Add a remote and run `git push` manually, or set #{SKIP_PUSH_ENV}=1 to silence this warning."
+      return
+    end
+
+    return if run_git('push')
+
+    target_remote = remotes.include?('origin') ? 'origin' : remotes.first
+    if run_git('push', '-u', target_remote, 'HEAD')
+      puts "[planctl] Pushed finalization ledger to #{target_remote} (set upstream)."
+      return
+    end
+
+    warn '[planctl] git push failed for finalization; finalization ledger is committed locally only.'
+    warn '[planctl] Resolve the push (auth, protected branch, diverged history) and push manually.'
   end
 
   # Pre-commit enforcement: stages every change via `git add -A` and
@@ -877,6 +962,7 @@ class PlanCtl
       'state_file' => state_file_relative,
       'handoff_file' => handoff_file_relative,
       'updated_at' => state['updated_at'],
+      'finalized_at' => state['finalized_at'],
       'completed_phases' => status['completed_phases'],
       'recent_completions' => Array(state['completion_log']).last(compression_history_limit).map { |entry| decorate_completion_entry(entry) },
       'next_phase' => next_phase,
@@ -1020,6 +1106,7 @@ class PlanCtl
       puts "State file: #{snapshot['state_file']}"
       puts "Handoff file: #{snapshot['handoff_file']}"
       puts "Updated at: #{snapshot['updated_at'] || 'not recorded yet'}"
+      puts "Finalized at: #{snapshot['finalized_at']}" if snapshot['finalized_at'] && !snapshot['finalized_at'].empty?
       puts
       puts "Completed phases: #{snapshot['completed_phases'].empty? ? 'none' : snapshot['completed_phases'].join(', ')}"
       puts
@@ -1081,6 +1168,9 @@ class PlanCtl
     lines << "- State file: `#{snapshot['state_file']}`"
     lines << "- Handoff file: `#{snapshot['handoff_file']}`"
     lines << "- Updated at: `#{snapshot['updated_at'] || 'not recorded yet'}`"
+    if snapshot['finalized_at'] && !snapshot['finalized_at'].empty?
+      lines << "- Finalized at: `#{snapshot['finalized_at']}`"
+    end
     lines << "- Completed phases: `#{snapshot['completed_phases'].empty? ? 'none' : snapshot['completed_phases'].join(', ')}`"
     lines << ''
 
@@ -1328,6 +1418,7 @@ class PlanCtl
       'manifest_file' => 'plan/manifest.yaml',
       'state_file' => state_file_relative,
       'handoff_file' => handoff_file_relative,
+      'finalized_at' => state['finalized_at'],
       'phases_total' => manifest_phases.length,
       'phases_completed' => completed.length,
       'first_completion_at' => timestamps.first&.iso8601,
@@ -1497,6 +1588,7 @@ class PlanCtl
     puts "Manifest: #{d['manifest_file']}"
     puts "State file: #{d['state_file']}"
     puts "Handoff file: #{d['handoff_file']}"
+    puts "Finalized at: #{d['finalized_at']}" if d['finalized_at'] && !d['finalized_at'].empty?
     puts
     puts "Phases: #{d['phases_completed']}/#{d['phases_total']} completed"
     if d['first_completion_at'] && d['last_completion_at']

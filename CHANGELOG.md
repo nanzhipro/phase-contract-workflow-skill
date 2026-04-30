@@ -17,11 +17,14 @@
 
 - `planctl finalize [--format text|json]` — explicit whole-plan wrap-up.
   Refuses to run (exit 2) until every manifest phase is in
-  `state.yaml.completed_phases`; otherwise aggregates project metadata,
+  `state.yaml.completed_phases`; on the first successful run it now records
+  `state.yaml.finalized_at`, refreshes `plan/handoff.md`, auto-commits the
+  finalization ledger, and attempts a best-effort push before aggregating project metadata,
   per-phase ledger (with `Phase-Id:` milestone commit lookup), repository
   state (branch, upstream, ahead/behind, working tree, remotes, last
   commit), doctor-style health checks, and a tailored "human next steps"
-  checklist into a single dashboard. `complete`, `advance`, `next`, and `resume` now
+  checklist into a single dashboard. Repeated `finalize` runs become read-only once
+  `finalized_at` exists. `complete`, `advance`, `next`, and `resume` now
   point at `finalize` as the mandatory final step instead of stopping at
   "All phases are completed". Agent instruction template gains §12
   Finalization rule binding the AI to run `finalize`, layer deep review
