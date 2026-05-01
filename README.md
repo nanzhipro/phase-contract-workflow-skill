@@ -4,159 +4,160 @@
 
 # Phase-Contract Workflow
 
-**About**: Disk-backed scaffolding for long-running AI workflows that survive context compression, fresh sessions, and Agent switches.
+**简介**：一套把长任务外部化到磁盘、可跨压缩、跨会话与跨 Agent 切换续跑的 AI 工作流脚手架。
 
-Model any long project as an **ordered chain of contracts**: progress, dependencies, and blast radius all live on disk. Stability comes from files and scripts in the repo, not from the model's memory.
+把长任务建模为**有序合同链**，让进度、依赖、边界全部落盘；稳定性来自仓库里的文件与脚本，而不是模型记忆。
 
-> _"Move AI stability out of model memory and into the repository filesystem."_
+> _"把 AI 的稳定性从模型记忆迁移到仓库文件系统。"_
 
 [![install](https://img.shields.io/badge/install-npx%20skills%20add-informational?logo=npm)](https://www.npmjs.com/package/skills)
 [![Copilot](https://img.shields.io/badge/GitHub%20Copilot-supported-24292e?logo=github)](./references/agent-instructions-template.md)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-supported-d97757)](./references/agent-instructions-template.md)
 [![Codex](https://img.shields.io/badge/Codex-supported-10a37f)](./references/agent-instructions-template.md)
 
-**English** · [中文](./README.zh-CN.md)
+[English](./README.en.md) · **中文**
 
 </div>
 
 ---
 
-**Quick links**: [Recommended scenarios](#recommended-scenarios) · [Install](#install--update) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Documentation](#documentation-map)
+**快速导航**：[推荐场景](#推荐场景) · [安装](#安装与更新) · [快速开始](#快速开始) · [工作原理](#工作原理) · [文档索引](#文档索引)
 
-## Why
+## 为什么
 
-Any AI Agent running continuously for 3+ hours will reliably hit four failure modes: **progress drift, scope creep, goal amnesia, and compression amnesia**. Writing a longer and more detailed `Plan.md` and trusting the model to self-police will still break at hour 2-3. This project shuts those failures down with **mechanism**, not with discipline.
+AI 连续工作 3 小时以上会稳定出现四类失败：**进度漂移、边界越界、目标遗忘、压缩失忆**。写一份越长越详细的 `Plan.md` 让 AI 自己判断，到 2-3 小时必崩。本项目用**机制**而非**自觉**封堵这四类失败。
 
-## Recommended scenarios
+## 推荐场景
 
-Use this Skill when you want an AI Agent to do more than patch one small issue: you want it to keep moving through a multi-hour or multi-day project without losing the thread.
+如果你已经不满足于让 AI “帮我改一个小功能”，而是想让它连续推进一个需要数小时甚至数天拆解的大项目，这个 Skill 就是为你准备的。
 
-It fits especially well when you are doing:
+你可以在这些场景里使用它：
 
-- **Large refactors and migrations**: framework upgrades, SDK replacements, module rewrites. The workflow splits work into dependency-aware phases so the Agent only edits inside the current boundary.
-- **New product builds**: infrastructure first, then data layer, services, UI, tests, and release. Every step gets a contract, acceptance checks, and a rollback-friendly milestone.
-- **Long-form documentation work**: technical manuals, research reports, course material. Chapters, review passes, formatting, and final delivery stay separate instead of being remembered through chat history.
-- **Compliance, security, or data-governance remediation**: access control, audit logs, encryption, schema rebuilds. Each control becomes part of an auditable execution ledger.
-- **Autonomous continuation**: after each phase, `complete --continue` chains into `advance --strict`, so the Agent keeps going, promotes placeholder contracts when needed, enters finalization when done, and only stops for real blockers.
+- **大型重构 / 迁移**：例如框架升级、SDK 替换、模块重写。它会把任务拆成有依赖的 phase，让 AI 每次只改当前边界内的文件，避免越改越散。
+- **从 0 到 1 搭产品**：例如先搭基础设施，再做数据层、服务层、界面、测试和发布。它会让每一步都有合同、验收和回滚点，而不是靠聊天记录记进度。
+- **长文档 / 课程 / 报告工程**：例如一本技术手册、系列研究报告或课程讲义。它会把章节、审校、格式化、交付拆开，避免后期忘掉前面的风格和约束。
+- **合规、安全、数据治理整改**：例如访问控制、日志审计、加密、schema 重建。它会把控制项变成可追踪的执行账本，方便复盘和审计。
+- **你想让 AI 一口气继续做下去**：每个 phase 完成后，`complete --continue` 会接上 `advance --strict`，自动判断下一步是继续实施、升级占位合同、进入收尾，还是遇到真实 blocker 才停下来找你。
 
-The result is not a chatty "I think I finished" report. You get a repo-backed execution system: `plan/state.yaml` records completed phases and the finalization ledger, `plan/handoff.md` preserves recovery context, git milestones show what changed at each step, and the first successful `finalize` auto-records the final close-out before returning release / archive / review decisions to you.
+用完之后，你得到的不是一份“AI 觉得自己做完了”的口头汇报，而是一套落在仓库里的执行系统：`plan/state.yaml` 不只记录哪些 phase 真的完成，还记录每个 phase 的 checks 摘要与最终收尾 ledger，`plan/handoff.md` 记录压缩后怎么恢复，git 里程碑记录每一步改了什么，而首次成功的 `finalize` 会先落最终收尾记录，再把项目仪表盘和发版 / 归档 / 审阅等决策点交还给你。
 
-The simplest way to start is to tell the Agent:
+最简单的用法是在 Agent 里直接说：
 
 ```text
-Plan and continuously execute this project with Phase-Contract: <your project goal>
+用 Phase-Contract 规划并连续推进这个项目：<你的项目目标>
 ```
 
-Once a plan exists, the daily loop is:
+如果项目已经生成了 plan，日常推进只需要遵循：
 
 ```bash
 ruby scripts/planctl advance --strict
 ruby scripts/planctl complete <phase-id> --summary "..." --next-focus "..." --continue
 ```
 
-## Core idea
+## 核心思路
 
-One line: **move AI stability out of "model memory" and into "repository filesystem".** The Agent only completes small contracts inside a small window; continuity across hours, sessions, and Agent switches is carried by scripts and files on disk.
+一句话：**把 AI 的稳定性从"模型记忆"迁移到"仓库文件系统"。** AI 只在小窗口里完成小合同，跨小时、跨会话、跨 Agent 切换的连续性由磁盘上的脚本与文件承载。
 
-Four load-bearing claims:
+四条底层主张：
 
-- **A long task is an ordered contract chain.** Decompose a month-scale project into `Phase₀ → Phase₁ → … → Phaseₙ`. Every Phase is defined by two documents: a _positioning contract_ (what it is) and an _execution contract_ (what it may touch). Goal and blast radius stay orthogonal.
-- **Three invariants are non-negotiable.** **I1** exactly one active Phase at any time; **I2** the working window always contains `common + phase + execution` - three docs, no more; **I3** completion only counts after it is written to `state.yaml`. Break any one and a long task will eventually derail.
-- **Mechanism beats discipline.** Progress is persisted atomically by the scheduler, blast radius is enforced by path-whitelist diffing, dependencies are blocked by `--strict`, and recovery is governed by `handoff.md` as a protocol. Stability is externally enforced, not begged for in the prompt.
-- **Scheduling is separated from execution.** `planctl` decides _what's next_; the AI only decides _how_. This is the only known way to keep the same AI capability usable five hours in.
+- **长任务 = 有序合同链**。把工期以月计的项目拆成一串 `Phase₀ → Phase₁ → … → Phaseₙ`；每个 Phase 由「定位合同（是什么）」和「执行合同（能碰什么）」双文档定义，目标与边界正交。
+- **三不变量不可破**。**I1** 任意时刻只有一个活跃 Phase；**I2** 工作窗口恒定为 `common + phase + execution` 三份文档；**I3** 完成必须落盘到 `state.yaml`，否则不视为完成。违反任一条，长任务必崩。
+- **机制 > 自觉**。进度由脚本原子写回，正式合同会在完成前先过 `lint-contracts`，required checks 决定 state 是否允许前进，边界由路径白名单 diff 校验，依赖由 `--strict` 阻断跳步，压缩恢复由 `handoff.md` 充当协议，所有稳定性都来自外部强制，而不是提示词恳求。
+- **调度与执行分离**。`planctl` 脚本决定"下一步做什么"，AI 只决定"怎么做"。这是把同一段 AI 能力在 5 小时后仍然可用的唯一已知办法。
 
-Corollary: this is neither a smarter prompt nor an Agent Framework. It is the minimum infrastructure that makes a **generic AI behave like a long-horizon engineer** under disk-level constraints.
+推论：这不是一个"更聪明的 Prompt"，也不是一个 Agent Framework，而是一套**让普通 AI 在磁盘约束下表现得像长程工程师**的最小基础设施。
 
-## How it works
+## 工作原理
 
-Three layers, cleanly separated:
+三层设计，各层职责正交：
 
-| Layer | Role | Authored by |
+| 层 | 作用 | 写入者 |
 | --- | --- | --- |
-| **Enforcement**<br>`.github/copilot-instructions.md` · `CLAUDE.md` · `AGENTS.md` | Turns the rules from "suggestions" into session-level preconditions | Human (all three kept byte-identical) |
-| **Scheduler**<br>`scripts/planctl` | Decides the next step, checks dependencies, writes the ledger atomically | Reuse the script in this repo |
-| **Contracts**<br>`plan/manifest.yaml` · `plan/common.md` · `plan/phases/*` · `plan/execution/*` | Defines _what to do_ (Phase) and _what may be touched_ (Execution) | Human (AI-assisted) |
+| **强制层**<br>`.github/copilot-instructions.md` · `CLAUDE.md` · `AGENTS.md` | 把规约从"建议"变成会话级前置条件 | 人（三份字节同步） |
+| **调度器**<br>`scripts/planctl` | 决定下一步做什么、校验依赖、原子写回账本 | 复用本仓库脚本 |
+| **合同层**<br>`plan/manifest.yaml` · `plan/common.md` · `plan/phases/*` · `plan/execution/*` | 定义"做什么 (Phase)"和"能碰什么 (Execution)" | 人（AI 辅助） |
 
-Runtime state lives in two files, owned exclusively by the scheduler:
+执行态由脚本独占维护的两份文件承载：
 
-- `plan/state.yaml` — objective progress ledger (atomically written on `complete`)
-- `plan/handoff.md` — compression-recovery anchor (auto-refreshed on `complete`)
+- `plan/state.yaml` — 客观进度账本（`complete` 原子写入）
+- `plan/handoff.md` — 压缩恢复锚点（`complete` 自动刷新）
 
-## Install & update
+## 安装与更新
 
-Use the [`skills`](https://www.npmjs.com/package/skills) CLI to install this repo as an Agent Skill into the skills directory of Copilot / Claude Code / Codex. One command handles fetch, registration, and future upgrades.
+推荐用 [`skills`](https://www.npmjs.com/package/skills) CLI 把本仓库作为 Agent Skill 安装到 Copilot / Claude Code / Codex 的 skills 目录，一条命令完成拉取、注册与后续升级。
 
 ```bash
-# Install into the current Agent's default skills directory (auto-detected)
+# 安装（自动识别当前 Agent 的默认 skills 目录）
 npx skills add nanzhipro/phase-contract-workflow-skill
 
-# Target a specific Agent explicitly
+# 显式指定目标 Agent
 npx skills add github:nanzhipro/phase-contract-workflow-skill --agent claude
 npx skills add github:nanzhipro/phase-contract-workflow-skill --agent copilot
 npx skills add github:nanzhipro/phase-contract-workflow-skill --agent codex
 
-# Update to latest main (add `-g` if it was installed globally)
+# 升级到最新 main（全局安装要加 `-g`）
 npx skills update phase-contract-workflow -g
 
-# Force reinstall (overwrites local edits - back up first)
+# 重装（覆盖本地修改，请先备份）
 npx skills add nanzhipro/phase-contract-workflow-skill --force
 
-# Remove
+# 卸载
 npx skills remove phase-contract-workflow -g
 ```
 
-Once installed, just tell the Agent "plan XXX with Phase-Contract" in any session. The Skill's discovery description lives in the [SKILL.md](./SKILL.md) frontmatter.
+安装后在对应 Agent 会话里直接说「用 Phase-Contract 规划 XXX 项目」即可触发；Skill 的发现描述见 [SKILL.md](./SKILL.md) 的 frontmatter。
 
-## Golden loop
+## 黄金循环
 
-Every Phase runs the same loop. You can compress or swap sessions at any breakpoint - re-entering from the top loses nothing.
+每个 Phase 走同一条环路；中断点随时可以压缩或换会话，下轮从起点重入即可无损续跑：
 
 ```text
-advance --strict  →  load 3 docs  →  execute (within execution boundary)
-                                           ↓
-                    ← handoff (by script) ← complete <id> --continue
-                                           ↓
-                              (all phases done) → finalize
+advance --strict  →  读 3 份上下文  →  实施（守 execution 边界）
+                                             ↓
+                       ← handoff (脚本自动)  ←  complete <id> --continue
+                                             ↓
+                                  （全部完成）→ finalize
 ```
 
-A single command kicks off, resumes, or wraps up:
+一条命令即可启动、恢复或收尾：
 
 ```bash
-ruby scripts/planctl advance --strict                  # new session / daily driver
-ruby scripts/planctl resume --strict                   # cold start after compression
+ruby scripts/planctl advance --strict                  # 新会话 / 日常推进
+ruby scripts/planctl resume --strict                   # 压缩后冷启动
+ruby scripts/planctl lint-contracts --phase <id>       # 实施前或 complete 前检查当前正式合同
 ruby scripts/planctl complete <id> --summary "..." --next-focus "..." --continue
-ruby scripts/planctl finalize                          # first success writes finalization ledger + git close-out, then prints the dashboard
-ruby scripts/planctl doctor                            # repo health check (SHA256-diff the three instruction files, etc.)
+ruby scripts/planctl finalize                          # 全部 phase 成功后写最终 ledger + git 收尾，然后输出全计划仪表盘
+ruby scripts/planctl doctor                            # 仓库体检（三份指令 SHA256 比对等）
 ```
 
-Phase boundaries are internal, not user confirmation points. `complete --continue` immediately chains into `advance --strict`; if the new current Phase is still a placeholder pair, `advance` returns `ACTION: promote_placeholder`, so promote both contracts to formal docs first. When `advance` returns `ACTION: finalize`, do **not** declare the project finished — the first successful `finalize` writes `finalized_at`, refreshes `plan/handoff.md`, runs `git add -A` → `git commit -F -` → `git push`, and only then prints the final execution dashboard. Later reruns stay read-only and only regenerate the dashboard. Details live in [references/phase-templates.md](./references/phase-templates.md) and [references/workflow-template.md](./references/workflow-template.md).
+phase 边界是内部动作，不是用户确认点。`complete` 现在会在任何状态写回前先跑一条硬门链：依赖检查、`lint-contracts`、manifest 里声明的 required checks，以及严格 `allowed_paths` 校验。任一 required gate 失败或超时，`state.yaml` 和 `handoff.md` 都不会前进。optional checks 失败只 warning，但其 `id / command / exit_code / duration / status / output_tail` 仍会写进 `completion_log[*].checks`。随后 `complete --continue` 会自动接上 `advance --strict`；如果新 current phase 仍是占位合同，`advance` 返回 `ACTION: promote_placeholder`，先把两份合同升级成正式文档，再继续实现。当 `advance` 返回 `ACTION: finalize`，**不要**直接对用户宣告项目结束——`finalize` 会先做最终硬校验：manifest 中所有 phase 都必须出现在 `completed_phases`，且每个 phase 都必须在 `completion_log` 中有 `completed_at` 和全部 required checks 通过的证据。只有校验全绿，首次成功的 `finalize` 才会写 `finalized_at`、刷新 `plan/handoff.md`、执行 `git add -A` → `git commit -F -` → `git push`，然后输出最终执行仪表盘；任一 phase 缺失、失败或账本不一致时，`finalize` 以 exit 2 拒绝，不写 ledger，也不输出仪表盘。后续重复执行保持只读，仅重新生成仪表盘。细节见 [references/phase-templates.md](./references/phase-templates.md) 与 [references/workflow-template.md](./references/workflow-template.md)。
 
-## Design principles
+## 设计原则
 
-- **Externalize state** - progress goes to files, not memory.
-- **Separate scheduling from execution** - the script decides _what_, the AI decides _how_.
-- **Three-file context law** - the working window is always `common + phase + execution`.
-- **Two-layer contract** - `phases/*` says _what it is_; `execution/*` says _what may be touched_ - goal and boundary kept orthogonal.
-- **Done means written** - a Phase that is not in `state.yaml` is not done, however eloquently the AI reports otherwise.
-- **Recovery is a first-class citizen** - `handoff.md` is a protocol, not a scratchpad.
-- **Close-out is explicit** - finishing the last Phase is not finishing the project; the first successful `finalize` records the close-out ledger, later reruns stay read-only, and the human still makes the release call.
+- **状态外部化**：进度写文件，不写记忆。
+- **调度与执行分离**：脚本决定做什么，AI 决定怎么做。
+- **三文件上下文律**：工作窗口恒定为 `common + phase + execution` 三份。
+- **双层合同**：`phases/*` 说"是什么"，`execution/*` 说"能碰什么"，目标与边界正交。
+- **完成即事实**：未进 `state.yaml` 的 Phase 不视为完成，不管 AI 自述多么漂亮。
+- **恢复是一等公民**：`handoff.md` 不是备忘录，是协议。
+- **收尾要显式**：跑完最后一个 Phase 不等于项目结束；首次成功的 `finalize` 会落最终 ledger，后续重复执行保持只读，而发版与否仍交由人类决定。
 
-Full eight principles, three invariants, failure model, and mitigation mapping: [references/methodology.md](./references/methodology.md).
+完整的八原则、三不变量、失败模型与封堵映射，参见 [references/methodology.md](./references/methodology.md)。
 
-## When to use
+## 适用边界
 
-**Use it for**: 0-to-1 product builds, framework/SDK migrations, major version upgrades, architecture replacements, long-form documentation projects, compliance remediation, long-pipeline ETL rebuilds.
+**适用**：大型从 0 到 1 产品、框架/SDK 迁移、大版本升级、架构替换、长文档工程、合规整改、长链路 ETL 重建。
 
-**Do not use it for**: single small fixes (too heavy); exploratory research (Phase boundaries cannot be predefined - use a ReAct-style loop instead); stretches where requirements are still unstable and Phases get rewritten repeatedly (stabilize requirements first).
+**不适用**：单次小修复（太重）；探索型研究（没有可预定义 Phase，应走 ReAct 一类方法）；需求高度不稳、Phase 会反复改写的阶段（先等需求稳定）。
 
-## Prerequisites
+## 前置条件
 
-- The target repo is a Git worktree (`git rev-parse --is-inside-work-tree` returns `true`). Outside a Git workspace there is no objective basis for Phase-level whitelist diffing or rollback; this is blocked by default. Explicit opt-out only: `PHASE_CONTRACT_ALLOW_NON_GIT=1`.
-- `ruby` 2.6 or newer is available locally. `planctl` is a single-file Ruby script with zero gem dependencies.
+- 目标仓库是 Git 工作区（`git rev-parse --is-inside-work-tree` 为 `true`）。非 Git 目录下无法做 Phase 级白名单比对与回滚，默认禁止，仅允许显式 opt-out：`PHASE_CONTRACT_ALLOW_NON_GIT=1`。
+- 本地有 `ruby`，版本 ≥ 2.6。planctl 是单文件脚本，不依赖任何 gem。
 
-## Quick start
+## 快速开始
 
-When used as an Agent Skill, just say "plan XXX with Phase-Contract" inside Copilot / Claude Code / Codex. The Skill interactively collects project framing, Phase decomposition, and hard constraints, then generates the full artifact set following the Procedure in [SKILL.md](./SKILL.md):
+当作 Agent Skill 使用时，在 Copilot / Claude Code / Codex 里直接说「帮我用 Phase-Contract 规划 XXX 项目」即可。Skill 会交互收集项目定位、Phase 切分、硬约束，并按 [SKILL.md](./SKILL.md) 的 Procedure 生成完整制品：
 
 ```text
 <project>/
@@ -174,41 +175,41 @@ When used as an Agent Skill, just say "plan XXX with Phase-Contract" inside Copi
 └── scripts/planctl
 ```
 
-For manual installation into an existing project, copy `scripts/planctl.rb` in and generate the rest from the templates - details in [SKILL.md](./SKILL.md).
+手工安装脚手架到已有项目时，直接把 `scripts/planctl.rb` 复制过去并按模板生成其他文件即可；细节见 [SKILL.md](./SKILL.md)。
 
-Only the current Phase needs a formal contract on day one. Future Phases can stay as placeholder pairs until entry, then be promoted when `advance --strict` returns `ACTION: promote_placeholder`.
+初次搭建时只需要把当前 phase 写成正式合同；future phase 可以先保留成对占位合同，等 `advance --strict` 返回 `ACTION: promote_placeholder` 时再升级。
 
-## Roadmap
+## 路线图
 
-From "no amnesia" (today) toward "no rot" (12-hour autonomy), in priority order:
+从"不失忆"（当前版本）走向"不腐化"（12 小时自治）的演进优先级：
 
-1. **Machine-verifiable completion gates** (P0) - let `execution` declare build / lint / test / diff gates; `complete` runs them first and refuses to write state on red.
-2. **Git-level checkpoints and rollback** (P0) - auto-branch and tag each Phase; `complete` merges on green, resets on red; support per-Phase rollback instead of rerunning the whole chain.
-3. **Meta-Phase Replan** (P1) - force a replanning Phase every N execution Phases; manifest edits go through `planctl amend` for an audit trail.
-4. **Contract DAG with parallel execution** (P1) - `next --parallel N` plus Git worktrees; compress a 12 h sequential plan into 6-8 h.
-5. **Targeted context retrieval** (P2) - `planctl context <phase>` pulls relevant excerpts from completed artifacts; forbid the AI from free-form grep.
-6. **Budgets, health, circuit breakers** (P2) - token / time / retry budgets; escalate to a human on repeated failure.
+1. **可修复的 complete 事务**（P0）——把 `complete` 拆成显式 checking / writing / committing 阶段，让 commit / push 失败后可恢复，而不是只留 warning。
+2. **Git 级检查点 + 回滚**（P0）——每个 Phase 自动建分支打 tag，`complete` 成功合并，失败 reset；支持定点回滚单段而不是重跑全链。
+3. **Meta-Phase Replan**（P1）——每 N 个实施 Phase 强制插入一次重规划，manifest 变更走 `planctl amend` 留审计。
+4. **合同 DAG + 并行执行**（P1）——`next --parallel N` 配合 Git worktree，把 12 小时串行压到 6-8 小时。
+5. **定向上下文检索**（P2）——`planctl context <phase>` 从已完成产物抓片段，禁止 AI 自由 grep。
+6. **预算、健康度、熔断**（P2）——token/时长/重试预算，连续失败自动 escalate 等人工。
 
-The evolutionary motto stays the same: **replace "AI self-discipline" with "script enforcement".**
+演进哲学一以贯之：**把"AI 自律"换成"脚本强制"**。
 
-## Documentation map
+## 文档索引
 
-- [SKILL.md](./SKILL.md) - full scaffolding procedure and quality gates
-- [references/glossary.md](./references/glossary.md) - glossary of concepts and terms (contract chain, three invariants, four failure modes, scheduler commands, adjacent-concept comparison)
-- [references/methodology.md](./references/methodology.md) - complete methodology (three invariants, eight principles, enforcement layer, hard constraints)
-- [references/templates.md](./references/templates.md) - `manifest` / `common` / `state` / `handoff` templates
-- [references/phase-templates.md](./references/phase-templates.md) - two-layer contract templates (positioning + execution)
-- [references/workflow-template.md](./references/workflow-template.md) - `plan/workflow.md` template, rollback and close-out flows
-- [references/agent-instructions-template.md](./references/agent-instructions-template.md) - shared template for the three Agent instruction files
-- [assets/README.md](./assets/README.md) - logo / mark assets and design rationale
-- [CHANGELOG.md](./CHANGELOG.md) - version history
+- [SKILL.md](./SKILL.md) — 生成脚手架的完整流程与 Quality Gates
+- [references/glossary.md](./references/glossary.md) — 概念与名词表（合同链 / 三不变量 / 四类失败 / 调度器命令 / 相邻概念对比）
+- [references/methodology.md](./references/methodology.md) — 方法论全文（三不变量 + 八原则 + 强制层 + 硬约束）
+- [references/templates.md](./references/templates.md) — `manifest` / `common` / `state` / `handoff` 模板
+- [references/phase-templates.md](./references/phase-templates.md) — 双层合同（Phase 定位 + execution 围栏）模板
+- [references/workflow-template.md](./references/workflow-template.md) — `plan/workflow.md` 模板与回退 / 结束全流程
+- [references/agent-instructions-template.md](./references/agent-instructions-template.md) — 三份 Agent 指令的共同模板
+- [assets/README.md](./assets/README.md) — Logo / mark 资产与设计语义
+- [CHANGELOG.md](./CHANGELOG.md) — 版本演进记录
 
-## License
+## 许可证
 
-Shares the license of the parent Agent Skill library. `scripts/planctl.rb` has no external dependencies and can be copied out and reused standalone.
+与本 Agent Skill 库同源；单独使用 `scripts/planctl.rb` 无外部依赖，按需复制即可。
 
 <div align="center">
 
-[English](./README.md) · [中文](./README.zh-CN.md)
+[English](./README.en.md) · **中文**
 
 </div>

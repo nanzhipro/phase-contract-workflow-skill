@@ -3,6 +3,7 @@
 
 require 'json'
 require 'optparse'
+require 'open3'
 require 'pathname'
 require 'time'
 require 'yaml'
@@ -26,6 +27,26 @@ class PlanCtl
     /do not implement/i,
     /upgrade .* formal contract/i
   ].freeze
+  CONTRACT_MARKERS = %w[
+    PHASE_CONTRACT:FACT_AUDIT
+    PHASE_CONTRACT:PRODUCTION_WIRING
+    PHASE_CONTRACT:RUNTIME_EVIDENCE
+    PHASE_CONTRACT:FAILURE_MODES
+  ].freeze
+  SUBJECTIVE_LANGUAGE_PATTERNS = [
+    /良好/,
+    /合理/,
+    /基本完成/,
+    /可接受/,
+    /看起来/,
+    /good enough/i,
+    /reasonable/i,
+    /\bacceptable\b/i,
+    /looks\s+(good|fine|ok|okay)/i
+  ].freeze
+  CHECK_OUTPUT_LINE_LIMIT = 80
+  CHECK_OUTPUT_CHAR_LIMIT = 12_000
+  CHECK_TIMEOUT_EXIT_CODE = 124
 
   def initialize(repo_root)
     @repo_root = Pathname.new(repo_root)
@@ -135,7 +156,7 @@ class PlanCtl
       warn "[planctl] warning: summary first line exceeds 120 chars; commit subject will be long. Consider tightening."
     end
     phase = fetch_phase(phase_id)
-    state = load_state(create_if_missing: true)
+    state = load_state
     completed = Array(state['completed_phases'])
     missing_dependencies = Array(phase['depends_on']) - completed
 
@@ -149,12 +170,31 @@ class PlanCtl
       return
     end
 
+    contract_lint = run_contract_lint_check(phase)
+    unless contract_lint['status'] == 'passed'
+      warn "[planctl] contract lint failed for #{phase_id}."
+      warn contract_lint['output_tail'] unless blank?(contract_lint['output_tail'])
+      exit 2
+    end
+
+    required_results = run_declared_checks(phase, kind: 'required')
+    failed_required = required_results.reject { |result| result['status'] == 'passed' }
+    unless failed_required.empty?
+      failed_required.each { |result| warn format_check_failure(result, required: true) }
+      exit 2
+    end
+
     # Pre-flight allowed_paths enforcement. Runs BEFORE any state write so a
     # strict violation aborts cleanly without leaving the ledger ahead of
     # the git history. Works best-effort when git is disabled — enforcement
     # simply no-ops because we can't diff.
     unless precheck_allowed_paths!(phase)
       exit 2
+    end
+
+    optional_results = run_declared_checks(phase, kind: 'optional')
+    optional_results.reject { |result| result['status'] == 'passed' }.each do |result|
+      warn format_check_failure(result, required: false)
     end
 
     completed << phase_id
@@ -167,6 +207,7 @@ class PlanCtl
     }
     completion_entry['summary'] = summary unless blank?(summary)
     completion_entry['next_focus'] = next_focus unless blank?(next_focus)
+    completion_entry['checks'] = [contract_lint, *required_results, *optional_results] unless [contract_lint, *required_results, *optional_results].empty?
     completion_log << completion_entry
 
     new_state = state.merge(
@@ -423,6 +464,7 @@ class PlanCtl
 
     state_path = state_file_path
     handoff_path = handoff_file_path
+    state = nil
     if state_path.file?
       state = load_state
       known_ids = manifest_phases.map { |p| p['id'] }
@@ -440,6 +482,14 @@ class PlanCtl
       end
     else
       warnings << 'state.yaml not created yet; run `planctl advance --strict` or complete a phase.' if handoff_path.file?
+    end
+
+    current_phase = current_phase_for_lint(state)
+    if current_phase
+      puts "Contract lint target: #{current_phase['id']}"
+      lint = lint_phase_contract(current_phase, targeted: true, current_phase_id: current_phase['id'])
+      lint['warnings'].each { |warning| warnings << "contract lint: #{warning}" }
+      lint['problems'].each { |problem| problems << "contract lint: #{problem}" }
     end
 
     instruction_files = %w[.github/copilot-instructions.md CLAUDE.md AGENTS.md]
@@ -474,31 +524,60 @@ class PlanCtl
     end
   end
 
+  def lint_contracts(phase_id: nil, all: false)
+    state = state_file_path.file? ? load_state : default_state
+    current_phase = current_phase_for_lint(state)
+    targets = if all
+                manifest_phases
+              elsif phase_id
+                [fetch_phase(phase_id)]
+              elsif current_phase
+                [current_phase]
+              else
+                []
+              end
+
+    results = targets.map do |phase|
+      lint_phase_contract(
+        phase,
+        targeted: !all || phase['id'] == current_phase&.dig('id'),
+        current_phase_id: current_phase&.dig('id')
+      )
+    end
+
+    puts '=== Phase-Contract Contract Lint ==='
+    if results.empty?
+      puts 'No manifest phases found.'
+      return
+    end
+
+    results.each do |result|
+      puts "Phase: #{result['phase_id']} #{result['title']}"
+      if result['skipped_placeholder']
+        puts '- skipped formal-contract checks for future placeholder phase'
+      end
+      result['warnings'].each { |warning| puts "- warning: #{warning}" }
+      result['problems'].each { |problem| puts "- problem: #{problem}" }
+      puts '- ok: contract passes lint' if result['warnings'].empty? && result['problems'].empty?
+      puts
+    end
+
+    exit 2 if results.any? { |result| result['problems'].any? }
+  end
+
   # Final wrap-up dashboard. Runs only when every manifest phase is in
-  # state.yaml's completed_phases. Aggregates manifest, state ledger,
-  # handoff, git history (milestone commits), working-tree health, and
-  # doctor-style integrity checks into a single review payload, then
-  # prints a tailored "human next steps" checklist. The AI is expected
+  # state.yaml's completed_phases and each phase has a successful
+  # completion_log entry with required checks passing. Aggregates manifest,
+  # state ledger, handoff, git history (milestone commits), working-tree
+  # health, and doctor-style integrity checks into a single review payload,
+  # then prints a tailored "human next steps" checklist. The AI is expected
   # to render the dashboard verbatim to the user and add deeper review
-  # commentary on top — finalize itself never declares the project
-  # closed; that decision is the human's.
+  # commentary on top — finalize itself never declares the project closed;
+  # that decision is the human's.
   def finalize(format:)
     ensure_git_repo!
     state = load_state
-    completed = Array(state['completed_phases'])
-    phases = manifest_phases
-    remaining = phases.reject { |p| completed.include?(p['id']) }
-
-    unless remaining.empty?
-      warn "Cannot finalize: #{remaining.length} phase(s) still pending — #{remaining.map { |p| p['id'] }.join(', ')}."
-      warn '[planctl] finalize only runs after every manifest phase is in state.yaml. Run `ruby scripts/planctl advance --strict` to resume.'
-      exit 2
-    end
-
-    if completed.empty? || phases.empty?
-      warn 'Cannot finalize: no phases recorded as completed yet (state.yaml empty or manifest has no phases).'
-      exit 2
-    end
+    validate_finalize_readiness!(state)
 
     state = write_finalize_ledger_if_needed!(state)
     dashboard = build_finalize_dashboard(state)
@@ -751,7 +830,6 @@ class PlanCtl
   def precheck_allowed_paths!(phase)
     return true if git_opt_out?
     return true unless git_work_tree?
-    return true if env_truthy?(SKIP_COMMIT_ENV)
 
     allowed = Array(phase['allowed_paths'])
     return true if allowed.empty?
@@ -780,6 +858,288 @@ class PlanCtl
       violations.each { |path| warn "  - #{path} (warning only; enable enforcement via #{ENFORCE_PATHS_ENV}=1 or manifest.execution_rule.enforce_allowed_paths: true)" }
       true
     end
+  end
+
+  def run_contract_lint_check(phase)
+    started_at = monotonic_now
+    lint = lint_phase_contract(phase, targeted: true, current_phase_id: phase['id'])
+    output = contract_lint_output(lint)
+    {
+      'id' => 'contract-lint',
+      'command' => "ruby scripts/planctl lint-contracts --phase #{phase['id']}",
+      'exit_code' => lint['problems'].empty? ? 0 : 2,
+      'duration_seconds' => elapsed_since(started_at),
+      'status' => lint['problems'].empty? ? 'passed' : 'failed',
+      'output_tail' => summarize_check_output(output),
+      'required' => true
+    }
+  end
+
+  def run_declared_checks(phase, kind:)
+    definitions = declared_checks_for(phase, kind)
+    definitions.map do |definition|
+      run_declared_check(definition, required: kind == 'required')
+    end
+  end
+
+  def declared_checks_for(phase, kind)
+    Array(phase.dig('checks', kind))
+  end
+
+  def run_declared_check(definition, required:)
+    started_at = monotonic_now
+    id = definition['id'].to_s.strip
+    command = definition['command'].to_s.strip
+    timeout_seconds = normalize_timeout(definition['timeout_seconds'])
+
+    if id.empty? || command.empty?
+      return {
+        'id' => id.empty? ? '(missing-id)' : id,
+        'command' => command,
+        'exit_code' => 2,
+        'duration_seconds' => elapsed_since(started_at),
+        'status' => 'failed',
+        'output_tail' => summarize_check_output('check definition is missing id or command.'),
+        'required' => required
+      }
+    end
+
+    execution = run_shell_check(command, timeout_seconds: timeout_seconds)
+    {
+      'id' => id,
+      'command' => command,
+      'exit_code' => execution['exit_code'],
+      'duration_seconds' => elapsed_since(started_at),
+      'status' => execution['status'],
+      'output_tail' => summarize_check_output(execution['output']),
+      'required' => required
+    }
+  end
+
+  def run_shell_check(command, timeout_seconds:)
+    output = ''
+    process_status = nil
+    timed_out = false
+
+    Open3.popen2e('sh', '-lc', command, chdir: @repo_root.to_s, pgroup: true) do |stdin, stream, wait_thread|
+      stdin.close
+      reader = Thread.new { stream.read.to_s }
+
+      if timeout_seconds && timeout_seconds.positive?
+        unless wait_thread.join(timeout_seconds)
+          timed_out = true
+          terminate_process_group(wait_thread.pid, 'TERM')
+          unless wait_thread.join(1)
+            terminate_process_group(wait_thread.pid, 'KILL')
+            wait_thread.join
+          end
+        end
+      else
+        wait_thread.join
+      end
+
+      process_status = wait_thread.value
+      output = reader.value
+    end
+
+    if timed_out
+      return {
+        'status' => 'timeout',
+        'exit_code' => CHECK_TIMEOUT_EXIT_CODE,
+        'output' => [output, "[planctl] timeout after #{timeout_seconds}s"].reject(&:empty?).join("\n")
+      }
+    end
+
+    exit_code = process_status.exitstatus
+    exit_code = 1 if exit_code.nil? || exit_code.zero? && !process_status.success?
+    {
+      'status' => process_status.success? ? 'passed' : 'failed',
+      'exit_code' => exit_code,
+      'output' => output
+    }
+  rescue Errno::ENOENT => error
+    {
+      'status' => 'failed',
+      'exit_code' => 127,
+      'output' => error.message
+    }
+  end
+
+  def terminate_process_group(pid, signal)
+    Process.kill(signal, -pid)
+  rescue Errno::ESRCH, RangeError
+    Process.kill(signal, pid)
+  rescue Errno::ESRCH
+    nil
+  end
+
+  def format_check_failure(result, required:)
+    kind = required ? 'required' : 'optional'
+    header = "[planctl] #{kind} check #{result['id']} #{result['status']} (exit=#{result['exit_code']})."
+    details = []
+    details << "command: #{result['command']}" unless blank?(result['command'].to_s)
+    details << result['output_tail'] unless blank?(result['output_tail'].to_s)
+    ([header] + details).join("\n")
+  end
+
+  def current_phase_for_lint(state)
+    completed = Array(state && state['completed_phases'])
+    first_remaining_phase(completed) || manifest_phases.first
+  end
+
+  def lint_phase_contract(phase, targeted:, current_phase_id:)
+    placeholder_files = placeholder_contract_files_for(phase)
+    strict_formal = targeted || phase['id'] == current_phase_id || placeholder_files.empty?
+    problems = []
+    warnings = []
+
+    expected_context = unique_paths([common_context_path, phase['plan_file'], phase['execution_file']])
+    actual_context = normalized_context_for(phase)
+    if actual_context != expected_context
+      problems << "phase #{phase['id']} required_context must resolve to exactly #{expected_context.join(', ')}; got #{actual_context.join(', ')}."
+    end
+
+    if strict_formal && !placeholder_files.empty?
+      problems << "phase #{phase['id']} still uses placeholder contract file(s): #{placeholder_files.join(', ')}."
+    end
+
+    if strict_formal
+      if Array(phase['allowed_paths']).empty?
+        problems << "phase #{phase['id']} allowed_paths must not be empty."
+      end
+      if require_phase_checks? && declared_checks_for(phase, 'required').empty?
+        problems << "phase #{phase['id']} must declare at least one required check because execution_rule.require_phase_checks is true."
+      end
+      problems.concat(contract_file_lint_problems(phase['plan_file'], heading_type: 'phase'))
+      problems.concat(contract_file_lint_problems(phase['execution_file'], heading_type: 'execution'))
+    end
+
+    {
+      'phase_id' => phase['id'],
+      'title' => phase['title'],
+      'problems' => problems,
+      'warnings' => warnings,
+      'skipped_placeholder' => !strict_formal && !placeholder_files.empty?
+    }
+  end
+
+  def contract_file_lint_problems(relative_path, heading_type:)
+    problems = []
+    content = contract_file_content(relative_path)
+
+    CONTRACT_MARKERS.each do |marker|
+      problems << "#{relative_path} missing marker #{marker}." unless content.include?(marker)
+    end
+
+    section_titles = heading_type == 'phase' ? ['完成判定', 'Completion Criteria'] : ['交付检查', 'Delivery Checks']
+    lint_section = extract_heading_section(content, section_titles)
+    subjective_matches = SUBJECTIVE_LANGUAGE_PATTERNS.each_with_object([]) do |pattern, matches|
+      next unless lint_section.match?(pattern)
+
+      match = lint_section.match(pattern)
+      matches << match[0] if match
+    end
+    unless subjective_matches.empty?
+      problems << "#{relative_path} #{section_titles.first} contains subjective wording: #{subjective_matches.uniq.join(', ')}."
+    end
+
+    production_wiring = extract_heading_section(content, ['PHASE_CONTRACT:PRODUCTION_WIRING'])
+    if blank?(production_wiring)
+      problems << "#{relative_path} missing Production Wiring details after PHASE_CONTRACT:PRODUCTION_WIRING."
+    elsif !production_wiring.match?(/\bN\/A\b/i) && !table_has_data_rows?(production_wiring)
+      problems << "#{relative_path} Production Wiring must contain adoption rows or an explicit N/A reason."
+    end
+
+    problems
+  end
+
+  def contract_lint_output(result)
+    lines = []
+    lines << '=== Phase-Contract Contract Lint ==='
+    lines << "Phase: #{result['phase_id']} #{result['title']}"
+    result['warnings'].each { |warning| lines << "warning: #{warning}" }
+    if result['problems'].empty?
+      lines << 'ok: contract passes lint'
+    else
+      result['problems'].each { |problem| lines << "problem: #{problem}" }
+    end
+    lines.join("\n")
+  end
+
+  def extract_heading_section(content, titles)
+    lines = content.lines
+    buffer = []
+    collecting = false
+    heading_level = nil
+
+    lines.each do |line|
+      heading = line.match(/^(#+)\s*(.+?)\s*$/)
+      if heading
+        level = heading[1].length
+        title = heading[2].strip
+        if collecting && level <= heading_level
+          break
+        end
+        if titles.include?(title)
+          collecting = true
+          heading_level = level
+          next
+        end
+      end
+      buffer << line if collecting
+    end
+
+    buffer.join.strip
+  end
+
+  def table_has_data_rows?(content)
+    pipe_lines = content.lines.select { |line| line.include?('|') }
+    return false if pipe_lines.length < 3
+
+    pipe_lines.drop(2).any? do |line|
+      stripped = line.gsub(/[|\-:\s]/, '')
+      !stripped.empty?
+    end
+  end
+
+  def common_context_path
+    Array(@manifest.dig('execution_rule', 'required_context')).first ||
+      @manifest.dig('entrypoints', 'common') ||
+      'plan/common.md'
+  end
+
+  def require_phase_checks?
+    @manifest.dig('execution_rule', 'require_phase_checks') == true
+  end
+
+  def normalize_timeout(value)
+    return nil if value.nil?
+
+    timeout = value.to_i
+    timeout.positive? ? timeout : nil
+  end
+
+  def summarize_check_output(text)
+    lines = text.to_s.lines.last(CHECK_OUTPUT_LINE_LIMIT).join
+    tail = if lines.length > CHECK_OUTPUT_CHAR_LIMIT
+             lines[-CHECK_OUTPUT_CHAR_LIMIT, CHECK_OUTPUT_CHAR_LIMIT]
+           else
+             lines
+           end
+    tail.strip
+  end
+
+  def monotonic_now
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  def elapsed_since(started_at)
+    (monotonic_now - started_at).round(3)
+  end
+
+  def contract_file_content(relative_path)
+    path = @repo_root.join(relative_path)
+    path.file? ? read_text_file(path) : ''
   end
 
   def path_matches_any?(path, globs)
@@ -1264,7 +1624,7 @@ class PlanCtl
     path = @repo_root.join(relative_path)
     return false unless path.file?
 
-    header = path.read.lines.first(PLACEHOLDER_HEADER_LINE_LIMIT).join
+    header = read_text_file(path).lines.first(PLACEHOLDER_HEADER_LINE_LIMIT).join
     return true if PLACEHOLDER_SENTINELS.any? { |marker| header.include?(marker) }
 
     return false unless header.match?(/占位|placeholder/i)
@@ -1293,14 +1653,18 @@ class PlanCtl
       return state
     end
 
-    default_state = {
+    initial_state = default_state
+
+    write_state(initial_state) if create_if_missing
+    initial_state
+  end
+
+  def default_state
+    {
       'version' => STATE_SCHEMA_VERSION,
       'completed_phases' => [],
       'completion_log' => []
     }
-
-    write_state(default_state) if create_if_missing
-    default_state
   end
 
   def check_state_schema!(state, path)
@@ -1381,6 +1745,131 @@ class PlanCtl
   end
 
   # ---- finalize helpers ---------------------------------------------------
+
+  def validate_finalize_readiness!(state)
+    errors = finalize_readiness_errors(state)
+    return if errors.empty?
+
+    warn 'Cannot finalize: final dashboard requires every manifest phase to be completed and successful.'
+    errors.each { |error| warn "- #{error}" }
+    warn '[planctl] No finalization ledger was written and no dashboard was printed. Run `ruby scripts/planctl advance --strict` to resume or repair the ledger.'
+    exit 2
+  end
+
+  def finalize_readiness_errors(state)
+    phases = manifest_phases
+    phase_ids = phases.map { |phase| phase['id'] }
+    completed = Array(state['completed_phases'])
+    errors = []
+
+    if phases.empty?
+      errors << 'manifest has no phases.'
+      return errors
+    end
+
+    if completed.empty?
+      errors << 'state.yaml has no completed phases.'
+    end
+
+    missing = phase_ids - completed
+    unless missing.empty?
+      errors << "#{missing.length} phase(s) still pending: #{missing.join(', ')}."
+    end
+
+    unknown = completed - phase_ids
+    unless unknown.empty?
+      errors << "state.yaml completed_phases contains unknown phase(s): #{unknown.join(', ')}."
+    end
+
+    duplicates = completed.group_by(&:itself).select { |_id, values| values.length > 1 }.keys
+    unless duplicates.empty?
+      errors << "state.yaml completed_phases contains duplicate phase id(s): #{duplicates.join(', ')}."
+    end
+
+    completion_entries = completion_entries_by_phase(state)
+    phases.each do |phase|
+      phase_id = phase['id']
+      next unless completed.include?(phase_id)
+
+      entry = completion_entries[phase_id]
+      if entry.nil?
+        errors << "phase #{phase_id} is listed in completed_phases but has no completed_at entry in completion_log."
+        next
+      end
+
+      if parse_iso8601(entry['completed_at']).nil?
+        errors << "phase #{phase_id} has invalid completed_at timestamp: #{entry['completed_at'].inspect}."
+      end
+
+      checks = normalize_check_entries(entry['checks'])
+      if checks.empty?
+        errors << "phase #{phase_id} has no recorded checks in completion_log."
+        next
+      end
+
+      malformed_checks = checks.reject { |check| check.is_a?(Hash) }
+      unless malformed_checks.empty?
+        errors << "phase #{phase_id} has malformed check entries in completion_log."
+        next
+      end
+
+      required_checks = checks.select { |check| check_required?(check) }
+      if required_checks.empty?
+        errors << "phase #{phase_id} has no required check evidence in completion_log."
+      end
+
+      expected_required_ids = expected_required_check_ids_for(phase)
+      actual_required_ids = required_checks.map { |check| check['id'].to_s }
+      missing_required_ids = expected_required_ids - actual_required_ids
+      unless missing_required_ids.empty?
+        errors << "phase #{phase_id} missing required check evidence: #{missing_required_ids.join(', ')}."
+      end
+
+      required_checks.each do |check|
+        next if check['status'].to_s == 'passed'
+
+        id = check['id'] || '(unknown)'
+        status = check['status'] || '(missing-status)'
+        errors << "phase #{phase_id} required check #{id} failed (status=#{status}, exit=#{check['exit_code'] || 'n/a'})."
+      end
+    end
+
+    errors
+  end
+
+  def completion_entries_by_phase(state)
+    Array(state['completion_log']).each_with_object({}) do |entry, result|
+      next unless entry.is_a?(Hash)
+      next if blank?(entry['phase_id'].to_s)
+      next if blank?(entry['completed_at'].to_s)
+
+      result[entry['phase_id']] = entry
+    end
+  end
+
+  def normalize_check_entries(raw_checks)
+    case raw_checks
+    when Array
+      raw_checks
+    when Hash
+      [raw_checks]
+    else
+      []
+    end
+  end
+
+  def check_required?(check)
+    check['required'] != false
+  end
+
+  def expected_required_check_ids_for(phase)
+    declared_ids = declared_checks_for(phase, 'required').map do |definition|
+      id = definition['id'].to_s.strip
+      id.empty? ? '(missing-id)' : id
+    end
+
+    ['contract-lint', *declared_ids].uniq
+  end
 
   def build_finalize_dashboard(state)
     completed = Array(state['completed_phases'])
@@ -1643,11 +2132,15 @@ class PlanCtl
   end
 
   def load_yaml(path)
-    YAML.safe_load(File.read(path), permitted_classes: [], aliases: false) || {}
+    YAML.safe_load(read_text_file(path), permitted_classes: [], aliases: false) || {}
   rescue Psych::SyntaxError => error
     warn "Failed to parse YAML: #{path}"
     warn error.message
     exit 1
+  end
+
+  def read_text_file(path)
+    File.read(path.to_s, mode: 'r:UTF-8')
   end
 end
 
@@ -1658,6 +2151,7 @@ def usage
       ruby scripts/planctl next [--format prompt|json|paths] [--strict]
       ruby scripts/planctl advance [--format prompt|json] [--strict]
       ruby scripts/planctl status [--format text|json]
+      ruby scripts/planctl lint-contracts [--phase <phase-id> | --all]
       ruby scripts/planctl complete <phase-id> [--summary TEXT] [--next-focus TEXT] [--continue]
       ruby scripts/planctl revert <phase-id> [--mode revert|reset] [--summary TEXT]
       ruby scripts/planctl handoff [--format prompt|json] [--write]
@@ -1726,6 +2220,19 @@ when 'status'
     exit 1
   end
   planctl.status(format: options[:format])
+when 'lint-contracts'
+  options = { phase_id: nil, all: false }
+  parser = OptionParser.new do |opts|
+    opts.banner = usage
+    opts.on('--phase PHASE_ID', 'Lint a specific phase contract pair') { |value| options[:phase_id] = value }
+    opts.on('--all', 'Lint every manifest phase; future placeholder phases only get structural checks') { options[:all] = true }
+  end
+  parser.parse!(ARGV)
+  if ARGV.any? || (options[:all] && options[:phase_id])
+    warn parser.to_s
+    exit 1
+  end
+  planctl.lint_contracts(phase_id: options[:phase_id], all: options[:all])
 when 'complete'
   options = { summary: nil, next_focus: nil, continue: false }
   parser = OptionParser.new do |opts|

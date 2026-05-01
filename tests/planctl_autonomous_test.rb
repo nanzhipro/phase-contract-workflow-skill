@@ -128,6 +128,98 @@ class PlanctlAutonomousTest < Minitest::Test
     refute_includes out, 'Committed finalization ledger'
   end
 
+  def test_finalize_refuses_dashboard_when_completed_phase_lacks_successful_execution_log
+    File.write(File.join(@repo, 'plan/state.yaml'), <<~YAML)
+      version: 1
+      completed_phases:
+        - phase-0
+        - phase-1
+      completion_log:
+        - phase_id: phase-0
+          completed_at: "2026-01-01T00:00:00Z"
+          summary: "Phase 0 done."
+          next_focus: "Start phase 1."
+          checks:
+            - id: contract-lint
+              status: passed
+              required: true
+        - phase_id: phase-1
+          completed_at: "2026-01-01T00:01:00Z"
+          summary: "Phase 1 failed but was written manually."
+          next_focus: "Finalize execution."
+          checks:
+            - id: build
+              status: failed
+              required: true
+    YAML
+    baseline_handoff = File.read(File.join(@repo, 'plan/handoff.md'))
+
+    out, err, status = run_planctl(
+      { 'PHASE_CONTRACT_SKIP_COMMIT' => '1' },
+      'finalize'
+    )
+
+    refute status.success?
+    assert_equal 2, status.exitstatus
+    assert_includes err + out, 'phase-1'
+    assert_includes err + out, 'required check build failed'
+    refute_includes out, '=== Phase-Contract Final Execution Dashboard ==='
+    state = YAML.load_file(File.join(@repo, 'plan/state.yaml'))
+    refute state.key?('finalized_at')
+    assert_equal baseline_handoff, File.read(File.join(@repo, 'plan/handoff.md'))
+  end
+
+  def test_finalize_refuses_dashboard_when_declared_required_check_has_no_success_evidence
+    manifest_path = File.join(@repo, 'plan/manifest.yaml')
+    manifest = YAML.load_file(manifest_path)
+    manifest['phases'].last['checks'] = {
+      'required' => [
+        {
+          'id' => 'build',
+          'command' => "ruby -e 'exit 0'",
+          'timeout_seconds' => 30
+        }
+      ]
+    }
+    File.write(manifest_path, YAML.dump(manifest))
+    File.write(File.join(@repo, 'plan/state.yaml'), <<~YAML)
+      version: 1
+      completed_phases:
+        - phase-0
+        - phase-1
+      completion_log:
+        - phase_id: phase-0
+          completed_at: "2026-01-01T00:00:00Z"
+          summary: "Phase 0 done."
+          next_focus: "Start phase 1."
+          checks:
+            - id: contract-lint
+              status: passed
+              required: true
+        - phase_id: phase-1
+          completed_at: "2026-01-01T00:01:00Z"
+          summary: "Phase 1 claims done."
+          next_focus: "Finalize execution."
+          checks:
+            - id: contract-lint
+              status: passed
+              required: true
+    YAML
+
+    out, err, status = run_planctl(
+      { 'PHASE_CONTRACT_SKIP_COMMIT' => '1' },
+      'finalize'
+    )
+
+    refute status.success?
+    assert_equal 2, status.exitstatus
+    assert_includes err + out, 'phase-1'
+    assert_includes err + out, 'missing required check evidence: build'
+    refute_includes out, '=== Phase-Contract Final Execution Dashboard ==='
+    state = YAML.load_file(File.join(@repo, 'plan/state.yaml'))
+    refute state.key?('finalized_at')
+  end
+
   private
 
   def create_plan_files
@@ -135,10 +227,13 @@ class PlanctlAutonomousTest < Minitest::Test
     FileUtils.mkdir_p(File.join(@repo, 'plan/execution'))
     File.write(File.join(@repo, 'plan/common.md'), "# Common\n")
     File.write(File.join(@repo, 'plan/handoff.md'), "# Handoff\n")
-    File.write(File.join(@repo, 'plan/phases/phase-0.md'), "# Phase 0\n")
-    File.write(File.join(@repo, 'plan/execution/phase-0.md'), "# Execution 0\n")
-    File.write(File.join(@repo, 'plan/phases/phase-1.md'), "# Phase 1\n")
-    File.write(File.join(@repo, 'plan/execution/phase-1.md'), "# Execution 1\n")
+    FileUtils.mkdir_p(File.join(@repo, 'Sources/Feature'))
+    File.write(File.join(@repo, 'Sources/Feature/phase-0.txt'), "phase-0\n")
+    File.write(File.join(@repo, 'Sources/Feature/phase-1.txt'), "phase-1\n")
+    File.write(File.join(@repo, 'plan/phases/phase-0.md'), formal_phase_contract('Phase 0'))
+    File.write(File.join(@repo, 'plan/execution/phase-0.md'), formal_execution_contract('phase-0.txt'))
+    File.write(File.join(@repo, 'plan/phases/phase-1.md'), formal_phase_contract('Phase 1'))
+    File.write(File.join(@repo, 'plan/execution/phase-1.md'), formal_execution_contract('phase-1.txt'))
     File.write(File.join(@repo, 'plan/manifest.yaml'), <<~YAML)
       version: 1
       project: test-project
@@ -172,18 +267,91 @@ class PlanctlAutonomousTest < Minitest::Test
           plan_file: plan/phases/phase-0.md
           execution_file: plan/execution/phase-0.md
           depends_on: []
+          allowed_paths:
+            - Sources/Feature/**
         - id: phase-1
           title: Implement
           plan_file: plan/phases/phase-1.md
           execution_file: plan/execution/phase-1.md
           depends_on:
             - phase-0
+          allowed_paths:
+            - Sources/Feature/**
     YAML
     File.write(File.join(@repo, 'plan/state.yaml'), <<~YAML)
       version: 1
       completed_phases: []
       completion_log: []
     YAML
+  end
+
+  def formal_phase_contract(title)
+    <<~MARKDOWN
+      # #{title}
+
+      ## 阶段定位
+
+      - 验证 autonomous 流程。
+
+      ## PHASE_CONTRACT:FACT_AUDIT
+
+      - 确认 phase 对应的 Sources/Feature 路径已纳入生产边界。
+
+      ## PHASE_CONTRACT:PRODUCTION_WIRING
+
+      | artifact | producer | production caller | activation condition | fallback behavior | runtime evidence | owning phase |
+      | --- | --- | --- | --- | --- | --- | --- |
+      | phase fixture | test setup | phase runtime | default enabled | keep current phase | phase log | #{title.downcase.gsub(' ', '-')} |
+
+      ## PHASE_CONTRACT:RUNTIME_EVIDENCE
+
+      - `planctl complete` 成功写入 state 与 handoff。
+
+      ## PHASE_CONTRACT:FAILURE_MODES
+
+      - 阻断 placeholder、越界路径和缺失上下文。
+
+      ## 完成判定
+
+      - phase 可被 `complete` 正常完成。
+    MARKDOWN
+  end
+
+  def formal_execution_contract(artifact_name)
+    <<~MARKDOWN
+      # Execution #{artifact_name}
+
+      ## 必带上下文
+
+      - plan/common.md
+      - plan/phases/current.md
+
+      ## PHASE_CONTRACT:FACT_AUDIT
+
+      - 产物位于 Sources/Feature 下。
+
+      ## PHASE_CONTRACT:PRODUCTION_WIRING
+
+      | artifact | producer | production caller | activation condition | fallback behavior | runtime evidence | owning phase |
+      | --- | --- | --- | --- | --- | --- | --- |
+      | #{artifact_name} | test setup | phase runtime | default enabled | keep current phase | phase log | autonomous-test |
+
+      ## PHASE_CONTRACT:RUNTIME_EVIDENCE
+
+      - `complete --continue` 输出下一步 ACTION。
+
+      ## PHASE_CONTRACT:FAILURE_MODES
+
+      - placeholder 升级前不得实施。
+
+      ## 本次允许改动
+
+      - Sources/Feature/**
+
+      ## 交付检查
+
+      - `complete` 或 `finalize` 按预期输出。
+    MARKDOWN
   end
 
   def run_planctl(*args)

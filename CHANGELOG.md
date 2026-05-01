@@ -4,6 +4,30 @@
 
 ### Added
 
+- `planctl lint-contracts [--phase <phase-id> | --all]` — machine lint for
+  phase contracts. It validates the effective three-file context law
+  (`common + phase + execution`), required marker sections
+  (`PHASE_CONTRACT:FACT_AUDIT`, `:PRODUCTION_WIRING`,
+  `:RUNTIME_EVIDENCE`, `:FAILURE_MODES`), non-empty `allowed_paths`,
+  current-phase placeholder promotion rules, and the presence of at least
+  one required check when `execution_rule.require_phase_checks: true` is
+  enabled.
+- End-to-end completion quality gates for `planctl complete`. Before any
+  state write, `complete` now executes dependency validation,
+  `lint-contracts`, manifest-declared required checks, and strict
+  `allowed_paths` verification. Required failures and timeouts abort with
+  exit 2 and leave `plan/state.yaml`, `plan/handoff.md`, commit, and push
+  untouched. Optional check failures only warn.
+- Phase completion logs now persist check summaries in
+  `completion_log[*].checks`, including each check's `id`, `command`,
+  `exit_code`, `duration_seconds`, `status`, and truncated `output_tail`.
+- `planctl doctor` now lint-checks the current phase contract in addition
+  to the existing manifest/state/agent-instruction integrity checks.
+- `tests/planctl_quality_gates_test.rb` — regression coverage for required
+  check success/failure, optional warning-only checks, timeouts,
+  `require_phase_checks`, contract-marker linting, strict `allowed_paths`,
+  completion-log check summaries, and doctor integration.
+
 - `planctl advance [--format prompt|json] [--strict]` — autonomous
   continuation state machine. It emits `ACTION: implement`,
   `ACTION: promote_placeholder`, `ACTION: finalize`, or `ACTION: stop` so
@@ -91,6 +115,15 @@
   to upgrade.
 
 ### Documentation
+
+- `SKILL.md`, `README.md`, `README.zh-CN.md`,
+  `references/phase-templates.md`, `references/templates.md`,
+  `references/workflow-template.md`, and
+  `references/agent-instructions-template.md` now describe the new
+  end-to-end integrity contract: Fact Audit, Production Wiring,
+  Runtime Evidence, Failure Modes, Component Adoption Table,
+  `lint-contracts`, manifest `checks.required/optional`, and the rule that
+  required gates must pass before `state.yaml` may advance.
 
 - `README.md`, `README.zh-CN.md`, `SKILL.md`,
   `references/templates.md`, `references/workflow-template.md`,

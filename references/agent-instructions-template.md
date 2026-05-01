@@ -37,7 +37,8 @@
    - 讨论规划体系本身，而不是实施某个业务 phase。
 3. 如果是连续推进全部计划、持续推进剩余 phase，或用户表达出“一口气做完/继续往下做”的意图，必须先读取 `plan/handoff.md`，再运行 `ruby scripts/planctl advance --strict`。
 4. 如果用户明确指定某个已知 phase，必须运行 `ruby scripts/planctl resolve <phase-id> --format prompt --strict`。
-5. 如果用户讨论的是规划体系本身，而不是某个业务 phase 的实施，也必须先从 `plan/manifest.yaml` 出发，再确保表述与 `plan/workflow.md` 和 `scripts/planctl` 的实际行为一致。
+5. 如果当前 phase 已是正式合同，开始实施前必须确认其 `plan/phases/*.md` 与 `plan/execution/*.md` 都包含四个稳定 marker：`PHASE_CONTRACT:FACT_AUDIT`、`PHASE_CONTRACT:PRODUCTION_WIRING`、`PHASE_CONTRACT:RUNTIME_EVIDENCE`、`PHASE_CONTRACT:FAILURE_MODES`；并确认 `PHASE_CONTRACT:PRODUCTION_WIRING` 下存在 `Component Adoption Table` 或显式的 `N/A: <原因>`。
+6. 如果用户讨论的是规划体系本身，而不是某个业务 phase 的实施，也必须先从 `plan/manifest.yaml` 出发，再确保表述与 `plan/workflow.md` 和 `scripts/planctl` 的实际行为一致。
 
 ## 四、当前 Phase 的确定规则
 
@@ -87,19 +88,23 @@
 
 ## 八、完成与推进规约
 
-1. 只有在当前 phase 真实完成后，才能运行 `ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue` 写回执行状态并接续下一内部动作。`--summary` 和 `--next-focus` 都必须非空，空值会被拒绝（exit 2）。
+1. 只有在当前 phase 真实完成后，才能运行 `ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue` 写回执行状态并接续下一内部动作。`--summary` 和 `--next-focus` 都必须非空，空值会被拒绝（exit 2）。`complete` 会在写回前自动执行：依赖检查 → `lint-contracts` → required checks → `allowed_paths` gate。
 2. “真实完成”至少意味着：
    - 当前 phase 的 execution 文档中的交付检查已经满足。
    - 当前 phase 的阶段目标已经达到。
    - 当前 phase 没有违反禁止项和裁决规则。
+   - `ruby scripts/planctl lint-contracts --phase <phase-id>` 返回 0。
+   - manifest 为当前 phase 声明的 required checks 全部成功，且 Runtime Evidence 足以证明真实链路生效。
 3. 未写入 `plan/state.yaml` 的 phase，不视为完成。
 4. `complete` 会在一次调用内原子地刷新 `plan/state.yaml` 与 `plan/handoff.md`（tmp+rename），正常情况下**不需要**再额外跑 `ruby scripts/planctl handoff --write`；后者仅作为手工补救手段，当发现 handoff 与 state 失步或手动编辑过其中之一时再用。
 5. 不得在未运行 `complete` 的情况下，直接开始后续 phase。
 6. `complete` 时默认使用 `--continue`，即运行 `ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue`。该命令会在完成写回与 git 里程碑后立即执行 `advance` 并输出下一内部动作。若 manifest 中 `execution_rule.continuation.mode` 为 `autonomous`，即使遗漏 `--continue`，`complete` 也会自动接上 `advance`。
-7. `complete` 会在写回 `state.yaml` / `handoff.md` 之后执行 `git add -A` → `git commit -F -`（地道英文 commit message：`chore(plan): complete <phase-id> — <title>`，带 `Phase-Id` / `Next-Focus` trailers） → `git push`（无 upstream 时回退到 `git push -u origin HEAD`；若仓库没有任何 remote，则只保留本地 commit 并继续，不得因此中止任务）。但在调用 `complete` 之前，AI 必须先根据当前 phase 产生的未跟踪文件自行推理哪些属于构建 / 编译 / 运行 / 测试中间产物，并在需要时更新根目录 `.gitignore`；判断标准以“是否可从源码或命令重新生成、是否属于真实交付物、是否被项目约定要求入库”为准，不能把 fixture、快照基线、lockfile、必须提交的生成代码/文档误判为垃圾。在当前 phase 实施期间**不得**自行 `git commit` 或 `git push`，以免产生半成品提交或提交信息风格漂移；把里程碑记录权统一交给 `complete`。
-8. 允许设置 `PHASE_CONTRACT_SKIP_PUSH=1`（仅本地 commit）或 `PHASE_CONTRACT_SKIP_COMMIT=1`（跳过整条 git 收尾）仅用于离线 / 排障等特殊场景，默认不要使用；若仓库天然没有 remote，也不要把它当成阻塞条件，应继续执行并在对用户的汇报里明确说明当前只落本地里程碑。若 AI 基于上述推理更新了 `.gitignore`，应将其视为正常基础设施变更，而不是越界编辑。
-9. 若 `complete` 的 commit 或 push 失败，`state.yaml` 仍会保持已完成状态（不回滚）；应当向用户报告 warning 原文并提示手动处置（鉴权、保护分支、pre-commit hook 等），而不是尝试手动 `git reset` 或伪造提交。
-10. 回退某个已完成 phase 时必须走 `ruby scripts/planctl revert <phase-id>`，不得手工 `git revert` / `git reset` 也不得手工改 `state.yaml`；script 会负责定位里程碑 commit、保护下游依赖、重写 state/handoff 并提交 ledger。
+7. 任一 required gate 失败或超时，`complete` 必须以 exit 2 退出，且不写 `state.yaml` / `handoff.md` / git 里程碑，也不得把 phase 口头宣告为已完成。
+8. optional checks 失败只会 warning，但必须被写进 `completion_log[*].checks`，并在后续 handoff / finalize / 人类汇报中可见。
+9. `complete` 会在写回 `state.yaml` / `handoff.md` 之后执行 `git add -A` → `git commit -F -`（地道英文 commit message：`chore(plan): complete <phase-id> — <title>`，带 `Phase-Id` / `Next-Focus` trailers） → `git push`（无 upstream 时回退到 `git push -u origin HEAD`；若仓库没有任何 remote，则只保留本地 commit 并继续，不得因此中止任务）。但在调用 `complete` 之前，AI 必须先根据当前 phase 产生的未跟踪文件自行推理哪些属于构建 / 编译 / 运行 / 测试中间产物，并在需要时更新根目录 `.gitignore`；判断标准以“是否可从源码或命令重新生成、是否属于真实交付物、是否被项目约定要求入库”为准，不能把 fixture、快照基线、lockfile、必须提交的生成代码/文档误判为垃圾。在当前 phase 实施期间**不得**自行 `git commit` 或 `git push`，以免产生半成品提交或提交信息风格漂移；把里程碑记录权统一交给 `complete`。
+10. 允许设置 `PHASE_CONTRACT_SKIP_PUSH=1`（仅本地 commit）或 `PHASE_CONTRACT_SKIP_COMMIT=1`（跳过整条 git 收尾）仅用于离线 / 排障等特殊场景，默认不要使用；若仓库天然没有 remote，也不要把它当成阻塞条件，应继续执行并在对用户的汇报里明确说明当前只落本地里程碑。若 AI 基于上述推理更新了 `.gitignore`，应将其视为正常基础设施变更，而不是越界编辑。
+11. 若 `complete` 的 commit 或 push 失败，`state.yaml` 仍会保持已完成状态（不回滚）；应当向用户报告 warning 原文并提示手动处置（鉴权、保护分支、pre-commit hook 等），而不是尝试手动 `git reset` 或伪造提交。
+12. 回退某个已完成 phase 时必须走 `ruby scripts/planctl revert <phase-id>`，不得手工 `git revert` / `git reset` 也不得手工改 `state.yaml`；script 会负责定位里程碑 commit、保护下游依赖、重写 state/handoff 并提交 ledger。
 
 ## 九、压缩恢复规约
 
@@ -143,10 +148,10 @@
 
 ## 十二、整体收尾规约（Finalization）
 
-当且仅当 `manifest.yaml` 中所有 phase 都已写入 `plan/state.yaml` 的 `completed_phases`、且 `ruby scripts/planctl advance --strict`（或最近一次 `complete --continue`）输出 `ACTION: finalize` 时，进入整体收尾流程。
+当且仅当 `manifest.yaml` 中所有 phase 都已写入 `plan/state.yaml` 的 `completed_phases`、每个 phase 都在 `completion_log` 中有 `completed_at` 与全部 required checks 成功证据、且 `ruby scripts/planctl advance --strict`（或最近一次 `complete --continue`）输出 `ACTION: finalize` 时，进入整体收尾流程。
 
 1. 必须立刻运行 `ruby scripts/planctl finalize`（默认 `text` 格式即可，需要结构化数据时再加 `--format json`）。
-2. `finalize` 在所有 phase 真正完成前会以 exit 2 拒绝执行；不得用 `PHASE_CONTRACT_*` 环境变量或手工修改 `state.yaml` 的方式绕过。
+2. `finalize` 在所有 phase 真正完成并成功前会以 exit 2 拒绝执行；缺失 `completion_log` 成功证据、required check 失败、unknown/duplicate `completed_phases` 都会阻断仪表盘输出。不得用 `PHASE_CONTRACT_*` 环境变量或手工修改 `state.yaml` 的方式绕过。
 3. 首次成功的 `finalize` 必须先写入最终 ledger，再输出仪表盘：
    - 写 `plan/state.yaml.finalized_at`，并同步刷新 `updated_at`
    - 刷新 `plan/handoff.md`

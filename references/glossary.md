@@ -142,6 +142,6 @@ advance --strict  →  读 3 份上下文  →  实施（守 execution 边界）
 
 <div align="center">
 
-回到 [中文 README](../README.zh-CN.md) · [English README](../README.md)
+回到 [中文 README](../README.md) · [English README](../README.en.md)
 
 </div>

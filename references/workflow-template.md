@@ -66,6 +66,7 @@
 - `resolve`: 解析指定 phase 的上下文和依赖
 - `next`: 找到当前应该执行的下一个 phase
 - `advance`: 输出连续执行状态机的下一动作（implement / promote_placeholder / finalize / stop）
+- `lint-contracts`: 检查当前正式合同是否具备稳定 marker、非空 `allowed_paths`、required checks 与可落地的 Production Wiring
 - `status`: 展示已完成、可执行、被阻塞的 phase
 - `complete`: 在 phase 真完成后把状态写回 `plan/state.yaml`
 - `handoff`: 生成或刷新 `plan/handoff.md`
@@ -123,9 +124,11 @@
    - `plan/common.md`
    - 当前 phase 文档
    - 当前 execution 文档
-3. 实施时必须服从 execution 文档中的允许改动、禁止项和交付检查
-4. phase 只有在真正完成后，才能运行 `planctl complete`
-5. 未写入 `plan/state.yaml` 的 phase，不视为完成
+3. 当前正式合同必须保留四个稳定 marker：`PHASE_CONTRACT:FACT_AUDIT`、`PHASE_CONTRACT:PRODUCTION_WIRING`、`PHASE_CONTRACT:RUNTIME_EVIDENCE`、`PHASE_CONTRACT:FAILURE_MODES`
+4. `PHASE_CONTRACT:PRODUCTION_WIRING` 下必须有 `Component Adoption Table`，覆盖所有新增类 / target / config / key / log / metric；没有生产接线时必须写 `N/A: <原因>`
+5. 实施时必须服从 execution 文档中的允许改动、禁止项和交付检查
+6. 在 `complete` 前，当前 phase 至少要通过依赖检查、`lint-contracts`、manifest 中声明的 required checks，以及 `allowed_paths` 路径门
+7. 未写入 `plan/state.yaml` 的 phase，不视为完成
 
 因此，进入下一 phase 的前提不是“感觉差不多了”，而是“状态文件已经明确记录完成”。
 
@@ -156,6 +159,7 @@
 
 ```bash
 ruby scripts/planctl advance --strict
+ruby scripts/planctl lint-contracts --phase <phase-id>
 ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue
 ```
 
@@ -168,6 +172,8 @@ ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<ne
 - 当前 phase 的 execution 文档中交付检查已经满足
 - 当前 phase 的阶段目标已经达到
 - 当前 phase 没有违反禁止项和裁决规则
+- `ruby scripts/planctl lint-contracts --phase <phase-id>` 返回 0
+- manifest 中该 phase 的 required checks 全部成功，并且 Runtime Evidence 足以证明真实链路生效
 
 然后运行：
 
@@ -175,10 +181,11 @@ ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<ne
 ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue
 ```
 
-此时会发生三件事：
+此时会发生四件事：
 
-- `plan/state.yaml` 记录该 phase 已完成
-- completion log 记录摘要和下一步焦点
+- `complete` 先运行依赖检查 → `lint-contracts` → required checks → `allowed_paths` gate；任一 required gate 失败都会 exit 2，且不会写 `state.yaml` / `handoff.md` / git 里程碑
+- 所有 required gate 通过后，`plan/state.yaml` 记录该 phase 已完成
+- completion log 记录摘要、下一步焦点，以及本次执行过的 checks 摘要（含 `id / command / exit_code / duration / status / output_tail`）
 - `--continue` 会立即运行 `advance`，输出后续内部动作
 
 紧接着 `complete` 还会自动完成**里程碑提交与推送**（见下一节）：AI 需要先根据当前 phase 产生的未跟踪文件，推理哪些属于构建 / 编译 / 运行 / 测试中间产物，并在需要时把精确规则写入根目录 `.gitignore`；随后再执行 `git add -A` → `git commit -F -` → `git push`，把本 phase 的所有改动（代码、文档、`state.yaml`、`handoff.md`，以及必要时新更新的 `.gitignore`）固化为一次可回溯、可回退的里程碑记录；若仓库没有 remote，则保留为本地里程碑并继续流程。在此之前**不要**自行 `git commit` / `git push`。
@@ -255,7 +262,7 @@ ruby scripts/planctl advance --strict
 ruby scripts/planctl finalize
 ```
 
-`finalize` 只在 `state.yaml` 已包含全部 manifest phase 时才会运行（否则 exit 2）。首次成功执行时，它会先按以下顺序写入最终 ledger，再输出仪表盘：
+`finalize` 只在 `state.yaml` 已包含全部 manifest phase，且每个 phase 都在 `completion_log` 中有 `completed_at` 与全部 required checks 成功证据时才会运行（否则 exit 2，且不输出仪表盘）。首次成功执行时，它会先按以下顺序写入最终 ledger，再输出仪表盘：
 
 - 写入 `plan/state.yaml.finalized_at`（UTC ISO8601）
 - 同步刷新 `plan/state.yaml.updated_at`

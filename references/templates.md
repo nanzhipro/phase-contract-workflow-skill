@@ -17,10 +17,12 @@ entrypoints:
 execution_rule:
   description: >-
     执行任一 Phase 时，必须同时携带完整通用上下文和当前 Phase 文档。
-    execution 文档负责显式声明这次执行的输入、边界、交付物和完成标准。
+    execution 文档负责显式声明这次执行的输入、边界、交付物、运行证据和完成标准。
   resolver: scripts/planctl
   state_file: plan/state.yaml
   handoff_file: plan/handoff.md
+  require_phase_checks: true
+  enforce_allowed_paths: true
   repo_instructions:
     - .github/copilot-instructions.md   # GitHub Copilot
     - CLAUDE.md                         # Claude Code
@@ -29,6 +31,7 @@ execution_rule:
     next_command: ruby scripts/planctl advance --strict
     completion_command: >-
       ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue
+    contract_lint_command: ruby scripts/planctl lint-contracts --phase <phase-id>
     # complete --continue 会在写回 state/handoff 与里程碑提交后立即解析下一内部动作。
     # 若新 current phase 的 plan/execution 仍带 PHASE_CONTRACT_PLACEHOLDER，
     # planctl advance 会返回 ACTION: promote_placeholder；先把两份文件升级成正式合同，
@@ -52,9 +55,8 @@ execution_rule:
     dependency_check: true
     stop_on_missing_context: true
     require_execution_file: true
-  # 可选：把 phase.allowed_paths 从"仅警告"升级为"违规直接 abort"。
-  # 建议在项目稳定后开启，强制 AI 在 phase 边界内产出。
-  enforce_allowed_paths: false
+    require_contract_lint: true
+    require_runtime_evidence: true
   compression_control:
     enabled: true
     max_completion_history: 3
@@ -82,12 +84,21 @@ phases:
       - plan/phases/phase-0-<slug>.md
       - plan/execution/phase-0-<slug>.md
     depends_on: []
-    # 可选：允许改动的路径白名单（glob）。与 execution 的"允许改动"一一对应。
-    # 当 execution_rule.enforce_allowed_paths 或 PHASE_CONTRACT_ENFORCE_PATHS=1 时，
-    # `complete` 在写回 state.yaml 之前会把 `git diff --cached` 与此白名单比对；
-    # 任何越界路径会直接 abort，state.yaml 不会被更新。
-    # 留空则退化为只警告（默认行为）。
-    allowed_paths: []
+    allowed_paths:
+      - <路径白名单 1>
+      - <路径白名单 2>
+    checks:
+      required:
+        - id: contract-lint
+          command: ruby scripts/planctl lint-contracts --phase phase-0
+          timeout_seconds: 60
+        - id: build
+          command: <build / test / integration / smoke 命令>
+          timeout_seconds: 1800
+      optional:
+        - id: runtime-smoke
+          command: <log / metric / artifact smoke 命令>
+          timeout_seconds: 60
   - id: phase-1
     title: <phase-1 标题>
     plan_file: plan/phases/phase-1-<slug>.md
@@ -98,6 +109,13 @@ phases:
       - plan/execution/phase-1-<slug>.md
     depends_on:
       - phase-0
+    allowed_paths:
+      - <路径白名单>
+    checks:
+      required:
+        - id: contract-lint
+          command: ruby scripts/planctl lint-contracts --phase phase-1
+          timeout_seconds: 60
   # 对于尚未进入的 future phase，建议先生成成对占位文件而不是空文件：
   # - plan/phases/phase-X-<slug>.md
   # - plan/execution/phase-X-<slug>.md
@@ -111,8 +129,16 @@ phases:
 
 - `required_context` 恰好三项（common + plan + execution），不要多也不要少
 - `depends_on` 只写真实依赖，禁止循环
+- 新项目默认 `execution_rule.require_phase_checks: true` 和 `execution_rule.enforce_allowed_paths: true`
+- 当前 phase 必须至少有一个 `checks.required` 条目；旧项目只有在 manifest 显式开启 `require_phase_checks: true` 时才会被 `complete` 阻断
+- `allowed_paths` 与 execution 合同中的“本次允许改动”逐项一致，不能为空
 - `compression_control.rules` 三条硬规则保持不变
 - 尚未进入的 future phase 若不写正式合同，必须使用带 `PHASE_CONTRACT_PLACEHOLDER` 的成对占位文件；不要留空文件
+- 所有正式 phase 的 plan / execution 文档都必须包含四个稳定 marker：
+  - `PHASE_CONTRACT:FACT_AUDIT`
+  - `PHASE_CONTRACT:PRODUCTION_WIRING`
+  - `PHASE_CONTRACT:RUNTIME_EVIDENCE`
+  - `PHASE_CONTRACT:FAILURE_MODES`
 
 ---
 
@@ -191,7 +217,7 @@ updated_at: null
 finalized_at: null
 ```
 
-**注意**：此文件由 `planctl complete` 与首次成功的 `planctl finalize` 写入，人类禁止手改。`finalized_at` 在首次 finalize 成功写 ledger 时填充；重复 finalize 保持只读。
+**注意**：此文件由 `planctl complete` 与首次成功的 `planctl finalize` 写入，人类禁止手改。successful `complete` 会把 phase 级 check 摘要写进 `completion_log[*].checks`，每条记录至少包含 `id`、`command`、`exit_code`、`duration_seconds`、`status` 和 `output_tail`。required check 失败时不会写入 `state.yaml`；optional check 失败会 warning，但仍随成功 phase 记录写进 ledger。`finalize` 只有在全部 manifest phase 都已完成且每个 phase 都有成功 completion log 证据时才会写 `finalized_at` 并输出仪表盘；否则 exit 2 且不写 ledger。重复 finalize 保持只读。
 
 ---
 
@@ -239,8 +265,9 @@ finalized_at: null
 ## 连续执行命令
 
 - next: `ruby scripts/planctl advance --strict`
+- lint: `ruby scripts/planctl lint-contracts --phase <phase-id>`
 - complete: `ruby scripts/planctl complete <phase-id> --summary "<summary>" --next-focus "<next-focus>" --continue`
 - handoff-repair (manual recovery only): `ruby scripts/planctl handoff --write`
 ```
 
-**注意**：`planctl handoff --write` 会以这个结构覆盖写入；它是**手动补救**命令，正常 Golden Loop 不需要额外调用，因为 `complete` 已自动刷新 handoff，而首次成功的 `finalize` 也会在写入 `finalized_at` 后自动刷新 handoff。初始手工留一份合格骨架只是为了首次 `advance` 之前可读。
+**注意**：`planctl handoff --write` 会以这个结构覆盖写入；它是**手动补救**命令，正常 Golden Loop 不需要额外调用，因为 `complete` 已在依赖检查、合同 lint、required checks 和 `allowed_paths` gate 全部通过之后自动刷新 handoff，而首次成功的 `finalize` 也会在写入 `finalized_at` 后自动刷新 handoff。初始手工留一份合格骨架只是为了首次 `advance` 之前可读。

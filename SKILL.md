@@ -63,17 +63,18 @@ argument-hint: "(optional) target project path and short project description"
 
 ## Core Principles (不可违反)
 
-| #   | 原则           | 落地动作                                                                                             |
-| --- | -------------- | ---------------------------------------------------------------------------------------------------- |
-| P1  | 状态外部化     | 进度写 `state.yaml`，不写 AI 记忆                                                                    |
-| P2  | 调度与执行分离 | 脚本决定做什么，AI 决定怎么做                                                                        |
-| P3  | 三文件上下文律 | 工作窗口只装 `common + phase + execution` 三份文档                                                   |
-| P4  | 双层合同       | `phases/*` 说"是什么"，`execution/*` 说"能碰什么"                                                    |
-| P5  | 依赖强制校验   | `depends_on` + `--strict` 阻断跳步                                                                   |
-| P6  | 完成即写入     | `complete` 原子写回 `state.yaml` 与 `handoff.md`，缺一不进下一圈                                     |
-| P7  | 固定恢复协议   | 压缩后永远三步：manifest → handoff → next                                                            |
-| P8  | 里程碑外部化   | `complete` 自动 `git add/commit/push`；有 remote 时形成远端记录，无 remote 时保留本地可回滚里程碑    |
+| #   | 原则           | 落地动作                                                                                                                                 |
+| --- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| P1  | 状态外部化     | 进度写 `state.yaml`，不写 AI 记忆                                                                                                        |
+| P2  | 调度与执行分离 | 脚本决定做什么，AI 决定怎么做                                                                                                            |
+| P3  | 三文件上下文律 | 工作窗口只装 `common + phase + execution` 三份文档                                                                                       |
+| P4  | 双层合同       | `phases/*` 说"是什么"，`execution/*` 说"能碰什么"                                                                                        |
+| P5  | 依赖强制校验   | `depends_on` + `--strict` 阻断跳步                                                                                                       |
+| P6  | 完成即写入     | `complete` 原子写回 `state.yaml` 与 `handoff.md`，缺一不进下一圈                                                                         |
+| P7  | 固定恢复协议   | 压缩后永远三步：manifest → handoff → next                                                                                                |
+| P8  | 里程碑外部化   | `complete` 自动 `git add/commit/push`；有 remote 时形成远端记录，无 remote 时保留本地可回滚里程碑                                        |
 | P9  | 显式整体收尾   | 全部 phase 完成后必须跑 `planctl finalize`；首次成功执行会写 `finalized_at`、刷新 handoff、自动 git 收尾，再把最终仪表盘和决策权交还人类 |
+| P10 | 完整性先于推进 | `complete` 先跑合同 lint、required checks 和路径 gate；任一 required gate 失败，`state.yaml` 不前进                                      |
 
 ## Procedure
 
@@ -114,13 +115,13 @@ argument-hint: "(optional) target project path and short project description"
 4. **初始 phase 列表**：phase id + 一句话标题 + depends_on（5–12 个为宜）
 5. **全局硬约束**：技术栈版本、依赖禁区、质量底线、非目标（5–10 条，够锋利即可）
 
-写不出客观完成判定的 phase，就是切错了，当场要求用户改切分。
+写不出客观完成判定、Runtime Evidence 或 Failure Modes 的 phase，就是切错了，当场要求用户改切分。
 
 ### Step 2: 生成骨架文件
 
 按 [templates/](./references/templates.md) 的模板同时产出：
 
-- `plan/manifest.yaml`：带 `compression_control`、`execution_rule`、`required_context` 三块；phase 列表展开所有 id 和 `depends_on`
+- `plan/manifest.yaml`：带 `compression_control`、`execution_rule`、`required_context`、`allowed_paths` 与 `checks.required/optional`；新项目默认 `execution_rule.require_phase_checks: true` 和 `execution_rule.enforce_allowed_paths: true`
 - `plan/common.md`：把 Step 1 第 5 项的硬约束成文
 - `plan/workflow.md`：直接复制 [references/workflow-template.md](./references/workflow-template.md)
 - `plan/state.yaml`：初始空态（`version: 1 / completed_phases: [] / completion_log: []`）
@@ -129,7 +130,7 @@ argument-hint: "(optional) target project path and short project description"
 
 ### Step 3: 安装 planctl
 
-把 [scripts/planctl.rb](./scripts/planctl.rb) 复制到目标项目的 `scripts/planctl`，加可执行位：`chmod +x scripts/planctl`。planctl **不内置固定的中间产物名单**；这部分交给 AI 在 phase 实施中结合未跟踪文件、构建/编译/运行/测试命令输出、路径语义和“是否可从源码重新生成”自行推理。凡被判断为临时输出的路径，AI 应在 `complete` 前把精确规则写入根目录 `.gitignore`，避免 `git add -A` 把它们带进里程碑提交；凡属于真实交付物、fixture、快照基线、lockfile、必须入库的生成代码/文档，则不得误忽略。跑一次 `ruby scripts/planctl status` 自检，再跑 `ruby scripts/planctl doctor` 做一次完整体检（Ruby 版本、git 工作区、manifest 引用、state/handoff 一致性、三份 agent 指令 SHA256 比对）。
+把 [scripts/planctl.rb](./scripts/planctl.rb) 复制到目标项目的 `scripts/planctl`，加可执行位：`chmod +x scripts/planctl`。planctl **不内置固定的中间产物名单**；这部分交给 AI 在 phase 实施中结合未跟踪文件、构建/编译/运行/测试命令输出、路径语义和“是否可从源码重新生成”自行推理。凡被判断为临时输出的路径，AI 应在 `complete` 前把精确规则写入根目录 `.gitignore`，避免 `git add -A` 把它们带进里程碑提交；凡属于真实交付物、fixture、快照基线、lockfile、必须入库的生成代码/文档，则不得误忽略。跑一次 `ruby scripts/planctl status` 自检，再跑 `ruby scripts/planctl lint-contracts --phase <phase-0-id>` 检查当前正式合同，最后跑 `ruby scripts/planctl doctor` 做完整体检（Ruby 版本、git 工作区、manifest 引用、当前 phase 合同 lint、state/handoff 一致性、三份 agent 指令 SHA256 比对）。
 
 ### Step 4: 生成第一批 phase 合同
 
@@ -145,6 +146,9 @@ argument-hint: "(optional) target project path and short project description"
 - 完成判定禁止出现"良好"、"合理"、"基本完成"等主观词
 - execution 的"允许改动"必须是路径级白名单
 - execution 是**围栏**而不是**脚手架**，不要写"第一步 A 第二步 B"
+- 所有正式合同都必须包含四个稳定 marker：`PHASE_CONTRACT:FACT_AUDIT`、`PHASE_CONTRACT:PRODUCTION_WIRING`、`PHASE_CONTRACT:RUNTIME_EVIDENCE`、`PHASE_CONTRACT:FAILURE_MODES`
+- `PHASE_CONTRACT:PRODUCTION_WIRING` 下面必须有 `Component Adoption Table`，覆盖所有新增类 / target / config / key / log / metric；若本 phase 没有生产接线，必须明确写 `N/A: <原因>`
+- 只在测试里被引用的组件必须标 `test_only`；若某组件计划在未来 phase 才接线，当前 phase 必须默认关闭，并在表格里标 `future_phase:<phase-id>`
 
 ### Step 5: 启动并验证
 
@@ -158,7 +162,8 @@ ruby scripts/planctl advance --strict
 
 1. 命令以 0 退出码返回 `ACTION: implement`、当前应执行的 phase 和其 `required_context`
 2. `required_context` 恰好是三份：`common.md` + `phases/phase-0-*.md` + `execution/phase-0-*.md`
-3. `plan/handoff.md` 已包含压缩恢复三步和下一 phase 指引
+3. `ruby scripts/planctl lint-contracts --phase <phase-0-id>` 返回 0，证明当前正式合同满足 marker / allowed_paths / required checks 的最低要求
+4. `plan/handoff.md` 已包含压缩恢复三步和下一 phase 指引
 
 ### Step 6: 输出使用指南
 
@@ -167,6 +172,9 @@ ruby scripts/planctl advance --strict
 ```bash
 # 查看下一步（连续执行状态机）
 ruby scripts/planctl advance --strict
+
+# 在实施前或改完合同后做当前 phase 的合同 lint
+ruby scripts/planctl lint-contracts --phase <phase-id>
 
 # 实施该 phase 后标记完成（自动刷新 handoff、并 git add -A / commit / push 本 phase 的里程碑）
 ruby scripts/planctl complete <phase-id> --summary "<做了什么>" --next-focus "<下一个 phase 要关注什么>" --continue
@@ -200,6 +208,8 @@ ruby scripts/planctl doctor
 
 - 压缩或新会话恢复**永远且仅**三步：读 manifest → 读 handoff → 跑 `advance --strict`（或一步 `resume --strict`）
 - `complete` 是写回 state + handoff + git 里程碑的原子入口；**不要**再对其补一次 `handoff --write`，未跑 `complete` 的 phase 则直接不视为完成
+- `complete` 在写回前会强制执行：依赖检查 → `lint-contracts` → required checks → `allowed_paths` gate；任一 required gate 失败都以 exit 2 退出，且不写 `state.yaml` / `handoff.md`
+- optional checks 失败只会 warning，但会被追加进 `completion_log[*].checks`，用于后续 handoff / finalize / 审查
 - `complete --continue` 之后必须立刻服从 `advance` 的下一 `ACTION`；若返回 `promote_placeholder`，先升级该 phase 的两份合同，不要停下来问用户是否继续
 - 未写入 `state.yaml` 的 phase 不视为完成，不管 AI 自己说做得多好
 - 当 `advance` / `complete --continue` 输出 `ACTION: finalize` 或 “All phases are completed”，下一动作不是直接对人类宣告项目结束，而是跑 `ruby scripts/planctl finalize`，把仪表盘和决策权按 Step 8 交还人类
@@ -253,7 +263,7 @@ AI 必须立刻执行的动作（连续执行，不需要用户确认）：
 ruby scripts/planctl finalize
 ```
 
-`finalize` 仅在 `state.yaml` 已包含 manifest 中全部 phase 时才会运行，否则以 exit 2 拒绝（防止半成品 plan 被误收尾）。首次成功执行时，它会先写 `plan/state.yaml.finalized_at`、刷新 `plan/handoff.md`、执行 `git add -A` → `git commit -F -` → `git push`，然后再输出最终执行仪表盘。若 commit 或 push 失败，只打印 warning，不回滚 ledger。若 `finalized_at` 已存在，后续重复 `finalize` 保持只读：不重写 ledger、不再次 commit/push，只重新生成仪表盘。
+`finalize` 仅在 `state.yaml` 已包含 manifest 中全部 phase，且每个 phase 都在 `completion_log` 中有 `completed_at` 与全部 required checks 成功证据时才会运行；任一 phase 缺失、失败或账本不一致都会以 exit 2 拒绝，且不写 ledger、不输出仪表盘。首次成功执行时，它会先写 `plan/state.yaml.finalized_at`、刷新 `plan/handoff.md`、执行 `git add -A` → `git commit -F -` → `git push`，然后再输出最终执行仪表盘。若 commit 或 push 失败，只打印 warning，不回滚 ledger。若 `finalized_at` 已存在，后续重复 `finalize` 保持只读：不重写 ledger、不再次 commit/push，只重新生成仪表盘。
 
 最终执行仪表盘会一次性聚合：
 

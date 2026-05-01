@@ -1,6 +1,6 @@
 # Phase-Contract Workflow TODO
 
-记录日期：2026-04-29
+记录日期：2026-05-01
 
 ## 来龙去脉
 
@@ -49,25 +49,25 @@ Phase-Contract Workflow 当前已经解决了长任务里最基础、也最致�
 - 不只依赖 AI 自觉读上下文，还能通过脚本提供定向上下文检索。
 - 不只在最后 finalize，还能在中途周期性重规划和健康熔断。
 
-## P0：完成判定机器化
+## 已完成优化：完整性质量门
 
 目标：让 `complete` 从“记录 AI 说完成了”，升级为“只有机器 gate 通过才允许写 state”。
 
-TODO：
+已落地：
 
-- [ ] 在 `manifest.yaml` 或 `execution/*.md` 中设计 `checks` 声明格式。
-- [ ] 支持 build / lint / test / typecheck / custom command 等 gate 类型。
-- [ ] `planctl complete` 在写入 `state.yaml` 前自动运行 required checks。
-- [ ] 任一 required check 失败时，拒绝写入 `state.yaml` 和 `handoff.md`。
-- [ ] 将 check 命令、退出码、耗时和日志摘要写入 `completion_log`。
-- [ ] 区分 `required_checks` 和 `optional_checks`，optional 失败只 warning。
-- [ ] 在 `finalize` 中展示每个 phase 的 gate 结果。
-- [ ] 在 `doctor` 中检查当前 phase 是否声明了必要 gate。
+- [x] 在 `manifest.yaml` 中定义 `checks.required / checks.optional`。
+- [x] 支持 build / lint / test / typecheck / custom command 等 shell gate。
+- [x] `planctl complete` 在写入 `state.yaml` 前自动运行 `lint-contracts` 与 required checks。
+- [x] 任一 required check 失败或 timeout 时，拒绝写入 `state.yaml`、`handoff.md`，也不 commit / push。
+- [x] 将 check 命令、退出码、耗时、状态和输出摘要写入 `completion_log[*].checks`。
+- [x] 区分 `required` 和 `optional`，optional 失败只 warning。
+- [x] `doctor` 集成当前 phase 的合同 lint。
+- [x] 新增 `tests/planctl_quality_gates_test.rb` 覆盖上述质量门。
 
-设计备注：
+下一步：
 
-- 当前 `complete` 已经会在写 state 前校验依赖和路径白名单；机器 gate 应插入同一条 preflight 链路。
-- 长任务里最危险的失败不是“没做”，而是“做坏了但 state 已经前进”。因此 gate 必须发生在 state 写入前。
+- [ ] 在 `finalize` 仪表盘里按 phase 汇总 gate 结果，而不是只留在 `completion_log`。
+- [ ] 为失败的 preflight checks 增加结构化失败日志，方便后续 repair / retry 命令复用。
 
 ## P0：两阶段 Complete 事务
 
@@ -91,10 +91,11 @@ TODO：
 
 TODO：
 
-- [ ] 将新生成项目的 `execution_rule.enforce_allowed_paths` 默认设为 `true`。
-- [ ] 在 phase 占位模板中强制要求填写 `allowed_paths`。
-- [ ] `planctl doctor` 检查当前 phase 是否缺少 `allowed_paths`。
-- [ ] `planctl lint-contracts` 检查 execution 中的允许改动是否为路径白名单。
+- [x] 将新生成项目的 `execution_rule.enforce_allowed_paths` 默认设为 `true`。
+- [x] `planctl lint-contracts` 检查当前正式 phase 的 `allowed_paths` 是否为空，并要求与 execution 合同一致。
+- [x] `planctl complete` 在写 state 前把越界路径当作 hard gate。
+- [ ] 在 phase 占位模板中强制要求填写 `allowed_paths`（占位 phase 仍允许稍后补正式值）。
+- [ ] `planctl doctor` 对当前 phase 缺少 `allowed_paths` 给出更明确的专门提示，而不只依赖合同 lint。
 - [ ] 为临时放宽边界提供显式 override，并要求写入风险说明。
 
 设计备注：
@@ -213,11 +214,14 @@ TODO：
 
 TODO：
 
-- [ ] 新增 `planctl lint-contracts`。
-- [ ] 检查 completion criteria 是否包含“良好”“合理”“基本完成”等主观词。
-- [ ] 检查 `required_context` 是否恰好三份。
-- [ ] 检查 future phase 是否仍是占位合同，当前 phase 是否已经正式化。
-- [ ] 检查 execution 是否包含路径级 `allowed_paths`。
+- [x] 新增 `planctl lint-contracts`。
+- [x] 检查 completion criteria / delivery checks 是否包含“良好”“合理”“基本完成”等主观词。
+- [x] 检查 effective `required_context` 是否恰好三份。
+- [x] 检查当前 phase 是否仍是占位合同，并对 future placeholder 保持兼容。
+- [x] 检查当前正式 phase 是否包含非空 `allowed_paths`。
+- [x] 检查四个稳定 marker 与 `Production Wiring` 表是否存在。
+- [ ] 检查 execution 中的“本次允许改动”是否与 manifest `allowed_paths` 逐项一致，而不只是非空。
+- [ ] 增加对 `test_only` / `future_phase:<id>` 标注完整性的专项 lint。
 - [ ] 检查 execution 是否写成步骤清单，而不是边界围栏。
 - [ ] 检查 common.md 是否混入某个 phase 专属规则或实施步骤。
 - [ ] 将 lint 结果接入 `doctor`。
