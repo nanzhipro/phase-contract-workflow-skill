@@ -4,11 +4,11 @@
 
 # Phase-Contract Workflow
 
-**简介**：一套把长任务外部化到磁盘、可跨压缩、跨会话与跨 Agent 切换续跑的 AI 工作流脚手架。
+**简介**：一套面向长周期 AI 项目的实用工作流，让任务在压缩、换会话、换 Agent 之后依然能稳稳续跑。
 
-把长任务建模为**有序合同链**，让进度、依赖、边界全部落盘；稳定性来自仓库里的文件与脚本，而不是模型记忆。
+Phase-Contract 不要求 Agent 把一切都记在上下文里，而是把大项目拆成一串清晰、可复查的小步骤。项目进度写在仓库里，所以即使中断很久，也能重新接上，而不是靠聊天记录回忆。
 
-> _"把 AI 的稳定性从模型记忆迁移到仓库文件系统。"_
+> *"把 AI 的稳定性从模型记忆迁移到仓库文件系统。"*
 
 [![install](https://img.shields.io/badge/install-npx%20skills%20add-informational?logo=npm)](https://www.npmjs.com/package/skills)
 [![Copilot](https://img.shields.io/badge/GitHub%20Copilot-supported-24292e?logo=github)](./references/agent-instructions-template.md)
@@ -19,27 +19,38 @@
 
 </div>
 
----
+***
 
 **快速导航**：[推荐场景](#推荐场景) · [安装](#安装与更新) · [快速开始](#快速开始) · [工作原理](#工作原理) · [文档索引](#文档索引)
 
 ## 为什么
 
-AI 连续工作 3 小时以上会稳定出现四类失败：**进度漂移、边界越界、目标遗忘、压缩失忆**。写一份越长越详细的 `Plan.md` 让 AI 自己判断，到 2-3 小时必崩。本项目用**机制**而非**自觉**封堵这四类失败。
+长时间使用 AI 做项目，真正容易坏掉的往往不是能力，而是连续性。目标会混在一起，当前任务会越做越宽，关键决策会在压缩后丢失。Phase-Contract 的作用，就是给这段长期工作一套稳定的书面结构，让 Agent 在中断之后还能沿着原来的方向继续推进。
 
 ## 推荐场景
 
-如果你已经不满足于让 AI “帮我改一个小功能”，而是想让它连续推进一个需要数小时甚至数天拆解的大项目，这个 Skill 就是为你准备的。
+如果你已经不满足于让 AI“帮我改一个小功能”，而是希望它能在数小时甚至数天的项目里持续推进、不反复走失，这个 Skill 就适合你。
+
+### 适合什么任务
 
 你可以在这些场景里使用它：
 
-- **大型重构 / 迁移**：例如框架升级、SDK 替换、模块重写。它会把任务拆成有依赖的 phase，让 AI 每次只改当前边界内的文件，避免越改越散。
-- **从 0 到 1 搭产品**：例如先搭基础设施，再做数据层、服务层、界面、测试和发布。它会让每一步都有合同、验收和回滚点，而不是靠聊天记录记进度。
-- **长文档 / 课程 / 报告工程**：例如一本技术手册、系列研究报告或课程讲义。它会把章节、审校、格式化、交付拆开，避免后期忘掉前面的风格和约束。
-- **合规、安全、数据治理整改**：例如访问控制、日志审计、加密、schema 重建。它会把控制项变成可追踪的执行账本，方便复盘和审计。
-- **你想让 AI 一口气继续做下去**：每个 phase 完成后，`complete --continue` 会接上 `advance --strict`，自动判断下一步是继续实施、升级占位合同、进入收尾，还是遇到真实 blocker 才停下来找你。
+* **大型重构 / 迁移**：比如框架升级、SDK 替换、模块重写。这类工作更适合被拆成一段一段推进，而不是塞进一轮对话里。
+* **从 0 到 1 搭产品**：基础设施、数据、服务、界面、测试、发布，本来就是不同性质的工作，分开推进会更稳。
+* **长文档 / 课程 / 报告工程**：写作、审校、格式化、交付各自独立，长期项目更容易保持结构和风格。
+* **合规、安全、数据治理整改**：要求多、链路长、复查频繁，把过程写清楚会比“记住它”更可靠。
+* **你想让 AI 能持续往前走**：它可以沿着当前步骤继续推进，而不是每次都从头解释一遍整个项目。
 
-用完之后，你得到的不是一份“AI 觉得自己做完了”的口头汇报，而是一套落在仓库里的执行系统：`plan/state.yaml` 不只记录哪些 phase 真的完成，还记录每个 phase 的 checks 摘要与最终收尾 ledger，`plan/handoff.md` 记录压缩后怎么恢复，git 里程碑记录每一步改了什么，而首次成功的 `finalize` 会先落最终收尾记录，再把项目仪表盘和发版 / 归档 / 审阅等决策点交还给你。
+### 你最终会得到什么
+
+用完之后，你得到的不是一句“我应该做完了”，而是一份更可信的项目记录：
+
+* 哪些事情真的做完了，有明确记录。
+* 中断之后怎么恢复，有现成线索。
+* 每一步改动都更小、更容易在 Git 里复查。
+* 到了该审阅、发版或归档的时候，交接点会更清楚。
+
+### 最小触发方式
 
 最简单的用法是在 Agent 里直接说：
 
@@ -47,7 +58,9 @@ AI 连续工作 3 小时以上会稳定出现四类失败：**进度漂移、边
 用 Phase-Contract 规划并连续推进这个项目：<你的项目目标>
 ```
 
-如果项目已经生成了 plan，日常推进只需要遵循：
+### 日常推进命令
+
+如果项目已经生成了 plan，日常推进通常就是：
 
 ```bash
 ruby scripts/planctl advance --strict
@@ -56,35 +69,46 @@ ruby scripts/planctl complete <phase-id> --summary "..." --next-focus "..." --co
 
 ## 核心思路
 
-一句话：**把 AI 的稳定性从"模型记忆"迁移到"仓库文件系统"。** AI 只在小窗口里完成小合同，跨小时、跨会话、跨 Agent 切换的连续性由磁盘上的脚本与文件承载。
+一句话：**把 AI 的连续性从模型记忆迁移到仓库本身。** Agent 只需要专注当前步骤，而项目的共同状态由仓库文件承载。
 
-四条底层主张：
+### 它为什么能更稳
 
-- **长任务 = 有序合同链**。把工期以月计的项目拆成一串 `Phase₀ → Phase₁ → … → Phaseₙ`；每个 Phase 由「定位合同（是什么）」和「执行合同（能碰什么）」双文档定义，目标与边界正交。
-- **三不变量不可破**。**I1** 任意时刻只有一个活跃 Phase；**I2** 工作窗口恒定为 `common + phase + execution` 三份文档；**I3** 完成必须落盘到 `state.yaml`，否则不视为完成。违反任一条，长任务必崩。
-- **机制 > 自觉**。进度由脚本原子写回，正式合同会在完成前先过 `lint-contracts`，required checks 决定 state 是否允许前进，边界由路径白名单 diff 校验，依赖由 `--strict` 阻断跳步，压缩恢复由 `handoff.md` 充当协议，所有稳定性都来自外部强制，而不是提示词恳求。
-- **调度与执行分离**。`planctl` 脚本决定"下一步做什么"，AI 只决定"怎么做"。这是把同一段 AI 能力在 5 小时后仍然可用的唯一已知办法。
+* **先把大目标拆小。** 与其让 Agent 同时记住整个项目，不如让它一次专注当前这一段工作。
+* **把共同状态写在仓库里。** 当前进度、当前关注点、恢复线索都在文件里，所以能跨压缩、跨会话延续。
+* **让顺序和执行分开。** 脚本负责判断现在该做哪一步，Agent 负责把这一步做好。
+* **把“完成”变成项目事实。** 一步工作只有在仓库里被记录下来，才算真的完成，而不是因为 Agent 说得很像完成。
 
-推论：这不是一个"更聪明的 Prompt"，也不是一个 Agent Framework，而是一套**让普通 AI 在磁盘约束下表现得像长程工程师**的最小基础设施。
+### 推论
+
+它不是试图把 Prompt 变魔法，也不是另起一套庞大的框架，而是一种更务实的办法：让普通模型在长项目里表现得更可靠一些。
 
 ## 工作原理
 
-三层设计，各层职责正交：
+它主要由三部分配合起来：
 
-| 层 | 作用 | 写入者 |
-| --- | --- | --- |
-| **强制层**<br>`.github/copilot-instructions.md` · `CLAUDE.md` · `AGENTS.md` | 把规约从"建议"变成会话级前置条件 | 人（三份字节同步） |
-| **调度器**<br>`scripts/planctl` | 决定下一步做什么、校验依赖、原子写回账本 | 复用本仓库脚本 |
-| **合同层**<br>`plan/manifest.yaml` · `plan/common.md` · `plan/phases/*` · `plan/execution/*` | 定义"做什么 (Phase)"和"能碰什么 (Execution)" | 人（AI 辅助） |
+* **共享指令**负责让不同 Agent 对项目边界和工作方式保持一致理解，位置在 `.github/copilot-instructions.md`、`CLAUDE.md`、`AGENTS.md`。
+* **工作流脚本**负责判断当前步骤、记录进度、帮助下一次顺利接上，位置在 `scripts/planctl`。
+* **项目工作文件**负责保存计划、当前工作与恢复线索，位置在 `plan/*`。
 
-执行态由脚本独占维护的两份文件承载：
+### 运行时状态
 
-- `plan/state.yaml` — 客观进度账本（`complete` 原子写入）
-- `plan/handoff.md` — 压缩恢复锚点（`complete` 自动刷新）
+日常使用里，最关键的就是两份文件：
+
+* `plan/state.yaml` — 项目进度记录
+* `plan/handoff.md` — 下一次快速接上的恢复说明
+
+## 使用前最值得知道的几件事
+
+* **Git 不是可有可无的前提**：这套工作流依赖 Git 来核对改动范围、保留里程碑和支持回退；没有 Git，很多“完成”都无法被客观验证。
+* **它保护的是“当前步骤”，不是一份一次写死的总计划**：先有一个总体骨架，但真正的细化会随着当前步骤的推进不断补全，所以未来步骤可以先保持占位。
+* **恢复方式是固定的**：压缩或换会话后，不应该把全部 phase 文档重新装回上下文，而是按 manifest → handoff → `advance --strict` 的顺序恢复，或者直接用 `resume --strict`。
+* **`complete` 是正常写回的唯一入口**：它负责刷新 `state.yaml`、`handoff.md`，并留下当前 phase 的 Git 里程碑；正常使用时不要手改这两个文件，也不要在 phase 中途自己 `git commit` / `git push`。
+* **跑完最后一个 phase 也不等于项目结束**：当脚本提示 `ACTION: finalize` 时，还需要跑一次 `finalize`，把最终仪表盘和后续决策点交还给人。
+* **如果你要改仓库级规则，三份 Agent 指令必须同步**：`.github/copilot-instructions.md`、`CLAUDE.md`、`AGENTS.md` 不是任选其一，而是需要保持一致的同一套约束。
 
 ## 安装与更新
 
-推荐用 [`skills`](https://www.npmjs.com/package/skills) CLI 把本仓库作为 Agent Skill 安装到 Copilot / Claude Code / Codex 的 skills 目录，一条命令完成拉取、注册与后续升级。
+推荐用 [`skills`](https://www.npmjs.com/package/skills) CLI 安装到 Copilot、Claude Code 或 Codex。多数情况下，一条命令就够了；后面的命令主要是给指定 Agent 或升级时使用。
 
 ```bash
 # 安装（自动识别当前 Agent 的默认 skills 目录）
@@ -105,11 +129,11 @@ npx skills add nanzhipro/phase-contract-workflow-skill --force
 npx skills remove phase-contract-workflow -g
 ```
 
-安装后在对应 Agent 会话里直接说「用 Phase-Contract 规划 XXX 项目」即可触发；Skill 的发现描述见 [SKILL.md](./SKILL.md) 的 frontmatter。
+安装后，在 Agent 会话里直接让它用 Phase-Contract 规划你的项目即可。完整脚手架流程和模板说明见 [SKILL.md](./SKILL.md)。
 
 ## 黄金循环
 
-每个 Phase 走同一条环路；中断点随时可以压缩或换会话，下轮从起点重入即可无损续跑：
+整个工作流会重复一个很简单的节奏：开始或恢复，加载当前项目上下文，完成当前步骤，记录进度，然后继续往下走。
 
 ```text
 advance --strict  →  读 3 份上下文  →  实施（守 execution 边界）
@@ -118,6 +142,8 @@ advance --strict  →  读 3 份上下文  →  实施（守 execution 边界）
                                              ↓
                                   （全部完成）→ finalize
 ```
+
+### 常用命令
 
 一条命令即可启动、恢复或收尾：
 
@@ -130,34 +156,48 @@ ruby scripts/planctl finalize                          # 全部 phase 成功后�
 ruby scripts/planctl doctor                            # 仓库体检（三份指令 SHA256 比对等）
 ```
 
-phase 边界是内部动作，不是用户确认点。`complete` 现在会在任何状态写回前先跑一条硬门链：依赖检查、`lint-contracts`、manifest 里声明的 required checks，以及严格 `allowed_paths` 校验。任一 required gate 失败或超时，`state.yaml` 和 `handoff.md` 都不会前进。optional checks 失败只 warning，但其 `id / command / exit_code / duration / status / output_tail` 仍会写进 `completion_log[*].checks`。随后 `complete --continue` 会自动接上 `advance --strict`；如果新 current phase 仍是占位合同，`advance` 返回 `ACTION: promote_placeholder`，先把两份合同升级成正式文档，再继续实现。当 `advance` 返回 `ACTION: finalize`，**不要**直接对用户宣告项目结束——`finalize` 会先做最终硬校验：manifest 中所有 phase 都必须出现在 `completed_phases`，且每个 phase 都必须在 `completion_log` 中有 `completed_at` 和全部 required checks 通过的证据。只有校验全绿，首次成功的 `finalize` 才会写 `finalized_at`、刷新 `plan/handoff.md`、执行 `git add -A` → `git commit -F -` → `git push`，然后输出最终执行仪表盘；任一 phase 缺失、失败或账本不一致时，`finalize` 以 exit 2 拒绝，不写 ledger，也不输出仪表盘。后续重复执行保持只读，仅重新生成仪表盘。细节见 [references/phase-templates.md](./references/phase-templates.md) 与 [references/workflow-template.md](./references/workflow-template.md)。
+### 脚本会替你兜住什么
+
+脚本负责处理那些长会话里最容易出错、但又不值得反复靠人盯着的机械部分：
+
+* 在记录进度前先检查当前步骤是否具备完成条件。
+* 让项目始终围绕当前这一步推进，而不是同时摊开很多步骤。
+* 如果未来步骤还只有一个占位说明，会提醒你先把它补成可执行的工作说明。
+* 这意味着项目不是先把所有任务细节一次规划完再排队执行，而是在推进当前步骤时，持续补全后续步骤的理解、推理与规划。
+* 只有当计划中的工作都被完整记账后，才会把项目视为真正收尾。
+
+更细的规则可以看 [references/phase-templates.md](./references/phase-templates.md) 和 [references/workflow-template.md](./references/workflow-template.md)。
 
 ## 设计原则
 
-- **状态外部化**：进度写文件，不写记忆。
-- **调度与执行分离**：脚本决定做什么，AI 决定怎么做。
-- **三文件上下文律**：工作窗口恒定为 `common + phase + execution` 三份。
-- **双层合同**：`phases/*` 说"是什么"，`execution/*` 说"能碰什么"，目标与边界正交。
-- **完成即事实**：未进 `state.yaml` 的 Phase 不视为完成，不管 AI 自述多么漂亮。
-- **恢复是一等公民**：`handoff.md` 不是备忘录，是协议。
-- **收尾要显式**：跑完最后一个 Phase 不等于项目结束；首次成功的 `finalize` 会落最终 ledger，后续重复执行保持只读，而发版与否仍交由人类决定。
+* **把进度放在大家都能检查的地方**：写进项目文件，而不是藏在聊天里。
+* **让当前工作保持足够小**：范围越收敛，Agent 和人类都越容易看清楚。
+* **把“决定做什么”和“把它做好”分开**：这样执行时更稳定。
+* **把中断恢复当成正常流程**：重新开始时应该像续上项目，而不是重新回忆。
+* **把完成视为被记录的事实**：不是一段听起来很像完成的汇报。
 
-完整的八原则、三不变量、失败模型与封堵映射，参见 [references/methodology.md](./references/methodology.md)。
+完整的方法论和设计说明，见 [references/methodology.md](./references/methodology.md)。
 
 ## 适用边界
 
-**适用**：大型从 0 到 1 产品、框架/SDK 迁移、大版本升级、架构替换、长文档工程、合规整改、长链路 ETL 重建。
+### 适用
 
-**不适用**：单次小修复（太重）；探索型研究（没有可预定义 Phase，应走 ReAct 一类方法）；需求高度不稳、Phase 会反复改写的阶段（先等需求稳定）。
+适合大型从 0 到 1 产品、迁移项目、大版本升级、架构替换、长文档工程、合规整改，以及其他“连续性比一时速度更重要”的任务。
+
+### 不适用
+
+不适合一次性小修复、开放式探索，或需求还在剧烈变化、暂时无法稳定拆步的阶段。
 
 ## 前置条件
 
-- 目标仓库是 Git 工作区（`git rev-parse --is-inside-work-tree` 为 `true`）。非 Git 目录下无法做 Phase 级白名单比对与回滚，默认禁止，仅允许显式 opt-out：`PHASE_CONTRACT_ALLOW_NON_GIT=1`。
-- 本地有 `ruby`，版本 ≥ 2.6。planctl 是单文件脚本，不依赖任何 gem。
+* 一个 Git 仓库，让工作流有可靠的项目历史可依附。
+* Ruby 2.6 或更高版本，用来运行内置的 `planctl` 脚本。
 
 ## 快速开始
 
-当作 Agent Skill 使用时，在 Copilot / Claude Code / Codex 里直接说「帮我用 Phase-Contract 规划 XXX 项目」即可。Skill 会交互收集项目定位、Phase 切分、硬约束，并按 [SKILL.md](./SKILL.md) 的 Procedure 生成完整制品：
+当作 Agent Skill 使用时，只要让它用 Phase-Contract 规划你的项目即可。Skill 会收集项目背景，把工作拆成步骤，并按 [SKILL.md](./SKILL.md) 生成所需文件：
+
+### 生成出来的脚手架
 
 ```text
 <project>/
@@ -175,38 +215,44 @@ phase 边界是内部动作，不是用户确认点。`complete` 现在会在任
 └── scripts/planctl
 ```
 
-手工安装脚手架到已有项目时，直接把 `scripts/planctl.rb` 复制过去并按模板生成其他文件即可；细节见 [SKILL.md](./SKILL.md)。
+### 手工接入
 
-初次搭建时只需要把当前 phase 写成正式合同；future phase 可以先保留成对占位合同，等 `advance --strict` 返回 `ACTION: promote_placeholder` 时再升级。
+如果要手工接入现有项目，把 `scripts/planctl.rb` 复制过去，再根据 [SKILL.md](./SKILL.md) 里的模板补齐配套文件即可。
+
+### 占位合同升级
+
+刚开始时，不需要把所有未来步骤一次写满。先把当前步骤写清楚，后面的步骤保留轻量占位，等真正轮到它们时再补细即可。
+
+更准确地说，这套工作流不是“先把全部任务完整规划好，再按顺序执行”，而是“先搭出总体骨架，再一边执行当前步骤，一边根据新发现继续规划、推理和细化后续步骤”。占位合同的意义就在这里：未来步骤先保留方向和接口，等真正进入时再升级成正式合同。
 
 ## 路线图
 
-从"不失忆"（当前版本）走向"不腐化"（12 小时自治）的演进优先级：
+这个项目的长期方向很简单：让长时间 AI 项目更容易恢复、更容易复查，也更容易稳住节奏。
 
-1. **可修复的 complete 事务**（P0）——把 `complete` 拆成显式 checking / writing / committing 阶段，让 commit / push 失败后可恢复，而不是只留 warning。
-2. **Git 级检查点 + 回滚**（P0）——每个 Phase 自动建分支打 tag，`complete` 成功合并，失败 reset；支持定点回滚单段而不是重跑全链。
-3. **Meta-Phase Replan**（P1）——每 N 个实施 Phase 强制插入一次重规划，manifest 变更走 `planctl amend` 留审计。
-4. **合同 DAG + 并行执行**（P1）——`next --parallel N` 配合 Git worktree，把 12 小时串行压到 6-8 小时。
-5. **定向上下文检索**（P2）——`planctl context <phase>` 从已完成产物抓片段，禁止 AI 自由 grep。
-6. **预算、健康度、熔断**（P2）——token/时长/重试预算，连续失败自动 escalate 等人工。
+1. **更安全的中断恢复**：让收尾做到一半时，也能更平滑地继续。
+2. **更强的检查点与回滚**：让每一步都更容易检查，也更容易撤回。
+3. **内建重规划时机**：让长项目调整方向时不会丢掉历史。
+4. **更好的并行支持**：让大型计划不必永远完全串行。
+5. **更精准的上下文取回**：让下一次会话只拿到真正需要的部分。
+6. **预算与健康控制**：让连续失败时更容易及时收敛，而不是继续漂移。
 
-演进哲学一以贯之：**把"AI 自律"换成"脚本强制"**。
+贯穿始终的思路没有变：**不要把稳定性寄托在 AI 自律上，而要把它做进项目结构里。**
 
 ## 文档索引
 
-- [SKILL.md](./SKILL.md) — 生成脚手架的完整流程与 Quality Gates
-- [references/glossary.md](./references/glossary.md) — 概念与名词表（合同链 / 三不变量 / 四类失败 / 调度器命令 / 相邻概念对比）
-- [references/methodology.md](./references/methodology.md) — 方法论全文（三不变量 + 八原则 + 强制层 + 硬约束）
-- [references/templates.md](./references/templates.md) — `manifest` / `common` / `state` / `handoff` 模板
-- [references/phase-templates.md](./references/phase-templates.md) — 双层合同（Phase 定位 + execution 围栏）模板
-- [references/workflow-template.md](./references/workflow-template.md) — `plan/workflow.md` 模板与回退 / 结束全流程
-- [references/agent-instructions-template.md](./references/agent-instructions-template.md) — 三份 Agent 指令的共同模板
-- [assets/README.md](./assets/README.md) — Logo / mark 资产与设计语义
-- [CHANGELOG.md](./CHANGELOG.md) — 版本演进记录
+* [SKILL.md](./SKILL.md) — 安装与脚手架生成流程
+* [references/glossary.md](./references/glossary.md) — 术语说明
+* [references/methodology.md](./references/methodology.md) — 完整设计说明
+* [references/templates.md](./references/templates.md) — 核心模板
+* [references/phase-templates.md](./references/phase-templates.md) — 步骤模板
+* [references/workflow-template.md](./references/workflow-template.md) — 工作流与收尾模板
+* [references/agent-instructions-template.md](./references/agent-instructions-template.md) — 共用 Agent 指令模板
+* [assets/README.md](./assets/README.md) — Logo 资产与设计说明
+* [CHANGELOG.md](./CHANGELOG.md) — 版本记录
 
 ## 许可证
 
-与本 Agent Skill 库同源；单独使用 `scripts/planctl.rb` 无外部依赖，按需复制即可。
+本项目沿用上层 Agent Skill 库的许可证；`scripts/planctl.rb` 没有外部依赖，也可以单独复用。
 
 <div align="center">
 

@@ -4,11 +4,11 @@
 
 # Phase-Contract Workflow
 
-**About**: Disk-backed scaffolding for long-running AI workflows that survive context compression, fresh sessions, and Agent switches.
+**About**: A practical workflow for long-running AI projects that need to survive context compression, fresh sessions, and Agent switches.
 
-Model any long project as an **ordered chain of contracts**: progress, dependencies, and blast radius all live on disk. Stability comes from files and scripts in the repo, not from the model's memory.
+Instead of asking an Agent to remember everything, Phase-Contract breaks a large project into a clear sequence of small, reviewable steps. Progress lives in the repository, so the work can resume after a pause without depending on chat history.
 
-> _"Move AI stability out of model memory and into the repository filesystem."_
+> *"Move AI stability out of model memory and into the repository filesystem."*
 
 [![install](https://img.shields.io/badge/install-npx%20skills%20add-informational?logo=npm)](https://www.npmjs.com/package/skills)
 [![Copilot](https://img.shields.io/badge/GitHub%20Copilot-supported-24292e?logo=github)](./references/agent-instructions-template.md)
@@ -19,27 +19,38 @@ Model any long project as an **ordered chain of contracts**: progress, dependenc
 
 </div>
 
----
+***
 
 **Quick links**: [Recommended scenarios](#recommended-scenarios) · [Install](#install--update) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Documentation](#documentation-map)
 
 ## Why
 
-Any AI Agent running continuously for 3+ hours will reliably hit four failure modes: **progress drift, scope creep, goal amnesia, and compression amnesia**. Writing a longer and more detailed `Plan.md` and trusting the model to self-police will still break at hour 2-3. This project shuts those failures down with **mechanism**, not with discipline.
+Long AI sessions rarely fail because the model suddenly becomes incapable. They fail because the project thread gets blurry: goals mix together, the current task expands, and key decisions disappear after context compression. Phase-Contract gives that work a stable written structure, so the Agent can keep moving in the intended direction even after interruptions.
 
 ## Recommended scenarios
 
-Use this Skill when you want an AI Agent to do more than patch one small issue: you want it to keep moving through a multi-hour or multi-day project without losing the thread.
+Use this Skill when the work is big enough that continuity matters. It is meant for projects where you want an Agent to keep going for hours or days without needing the same context to be re-explained every session.
+
+### Good fit
 
 It fits especially well when you are doing:
 
-- **Large refactors and migrations**: framework upgrades, SDK replacements, module rewrites. The workflow splits work into dependency-aware phases so the Agent only edits inside the current boundary.
-- **New product builds**: infrastructure first, then data layer, services, UI, tests, and release. Every step gets a contract, acceptance checks, and a rollback-friendly milestone.
-- **Long-form documentation work**: technical manuals, research reports, course material. Chapters, review passes, formatting, and final delivery stay separate instead of being remembered through chat history.
-- **Compliance, security, or data-governance remediation**: access control, audit logs, encryption, schema rebuilds. Each control becomes part of an auditable execution ledger.
-- **Autonomous continuation**: after each phase, `complete --continue` chains into `advance --strict`, so the Agent keeps going, promotes placeholder contracts when needed, enters finalization when done, and only stops for real blockers.
+* **Large refactors and migrations**: framework upgrades, SDK replacements, and module rewrites are easier when the work is divided into manageable stages.
+* **New product builds**: infrastructure, data, services, UI, testing, and release can move forward in a deliberate order instead of piling up in one conversation.
+* **Long-form documentation work**: writing, review, formatting, and final delivery stay separate, which helps a long document keep its structure and tone.
+* **Compliance, security, or data-governance remediation**: requirements stay visible, reviewable, and easier to trace across a long execution window.
+* **Autonomous continuation**: the Agent can move from one current step to the next without you restating the whole project each time.
 
-The result is not a chatty "I think I finished" report. You get a repo-backed execution system: `plan/state.yaml` records completed phases, per-phase check summaries, and the finalization ledger, `plan/handoff.md` preserves recovery context, git milestones show what changed at each step, and the first successful `finalize` auto-records the final close-out before returning release / archive / review decisions to you.
+### What you get
+
+The result is not a vague "I think I finished" report. You get a project record that is much easier to trust:
+
+* a written history of what has actually been completed
+* a recovery note for restarting after interruption or compression
+* smaller milestones that are easier to review in Git
+* a clearer handoff point for release, review, or archive decisions
+
+### Minimal prompt
 
 The simplest way to start is to tell the Agent:
 
@@ -47,7 +58,9 @@ The simplest way to start is to tell the Agent:
 Plan and continuously execute this project with Phase-Contract: <your project goal>
 ```
 
-Once a plan exists, the daily loop is:
+### Daily loop
+
+Once a plan exists, the daily rhythm is:
 
 ```bash
 ruby scripts/planctl advance --strict
@@ -56,35 +69,46 @@ ruby scripts/planctl complete <phase-id> --summary "..." --next-focus "..." --co
 
 ## Core idea
 
-One line: **move AI stability out of "model memory" and into "repository filesystem".** The Agent only completes small contracts inside a small window; continuity across hours, sessions, and Agent switches is carried by scripts and files on disk.
+One line: **move AI continuity out of model memory and into the repository.** The Agent focuses on one current step at a time, while the repository keeps the shared record of progress and context.
 
-Four load-bearing claims:
+### What keeps the work on track
 
-- **A long task is an ordered contract chain.** Decompose a month-scale project into `Phase₀ → Phase₁ → … → Phaseₙ`. Every Phase is defined by two documents: a _positioning contract_ (what it is) and an _execution contract_ (what it may touch). Goal and blast radius stay orthogonal.
-- **Three invariants are non-negotiable.** **I1** exactly one active Phase at any time; **I2** the working window always contains `common + phase + execution` - three docs, no more; **I3** completion only counts after it is written to `state.yaml`. Break any one and a long task will eventually derail.
-- **Mechanism beats discipline.** Progress is persisted atomically by the scheduler, contracts are linted before completion, required checks gate state advances, blast radius is enforced by path-whitelist diffing, dependencies are blocked by `--strict`, and recovery is governed by `handoff.md` as a protocol. Stability is externally enforced, not begged for in the prompt.
-- **Scheduling is separated from execution.** `planctl` decides _what's next_; the AI only decides _how_. This is the only known way to keep the same AI capability usable five hours in.
+* **Break a large goal into bounded steps.** Instead of asking the Agent to juggle the whole project at once, the workflow narrows attention to one current piece of work.
+* **Keep shared state outside the chat.** Progress, current focus, and restart context live in the repository, so they survive compression and session changes.
+* **Separate sequence from execution.** The script decides what the current step is; the Agent spends its effort doing the work inside that step.
+* **Treat completion as a recorded event.** A step is only considered done after the repository says it is done, not because the Agent sounded confident.
 
-Corollary: this is neither a smarter prompt nor an Agent Framework. It is the minimum infrastructure that makes a **generic AI behave like a long-horizon engineer** under disk-level constraints.
+### Corollary
+
+This is not trying to make a prompt magically smarter. It is a practical way to make ordinary models behave more reliably on long projects.
 
 ## How it works
 
-Three layers, cleanly separated:
+Three parts work together:
 
-| Layer | Role | Authored by |
-| --- | --- | --- |
-| **Enforcement**<br>`.github/copilot-instructions.md` · `CLAUDE.md` · `AGENTS.md` | Turns the rules from "suggestions" into session-level preconditions | Human (all three kept byte-identical) |
-| **Scheduler**<br>`scripts/planctl` | Decides the next step, checks dependencies, writes the ledger atomically | Reuse the script in this repo |
-| **Contracts**<br>`plan/manifest.yaml` · `plan/common.md` · `plan/phases/*` · `plan/execution/*` | Defines _what to do_ (Phase) and _what may be touched_ (Execution) | Human (AI-assisted) |
+* **Shared instructions** keep expectations and guardrails aligned across Agents. They live in `.github/copilot-instructions.md`, `CLAUDE.md`, and `AGENTS.md`.
+* **The workflow script** chooses the current step, records progress, and helps the project resume cleanly. It lives in `scripts/planctl`.
+* **Project working files** describe the plan, the current work, and the recovery context. They live under `plan/*`.
 
-Runtime state lives in two files, owned exclusively by the scheduler:
+### Runtime state
 
-- `plan/state.yaml` — objective progress ledger (atomically written on `complete`)
-- `plan/handoff.md` — compression-recovery anchor (auto-refreshed on `complete`)
+Two files matter most during day-to-day use:
+
+* `plan/state.yaml` — the written record of progress
+* `plan/handoff.md` — the note that helps the next session pick up quickly
+
+## What users should know first
+
+* **Git is not an optional extra**: the workflow relies on Git to verify scope, preserve milestones, and support rollback; without it, many "done" states stop being objectively trustworthy.
+* **It protects the current step, not a fully frozen master plan**: there is an overall shape, but later steps are refined as the current step progresses, which is why future steps can remain placeholders at first.
+* **Recovery follows a fixed protocol**: after compression or a fresh session, do not reload every phase document; recover through manifest → handoff → `advance --strict`, or simply use `resume --strict`.
+* **`complete` is the normal write-back boundary**: it refreshes `state.yaml`, updates `handoff.md`, and records the Git milestone for the current phase; under normal use, do not hand-edit those files or make separate phase-level `git commit` / `git push` calls.
+* **Finishing the last phase is not the same as closing the project**: when the script returns `ACTION: finalize`, run `finalize` once to produce the final dashboard and hand the next decisions back to the human.
+* **If you change repository-level rules, keep the three Agent instruction files in sync**: `.github/copilot-instructions.md`, `CLAUDE.md`, and `AGENTS.md` are one shared constraint set, not three independent files.
 
 ## Install & update
 
-Use the [`skills`](https://www.npmjs.com/package/skills) CLI to install this repo as an Agent Skill into the skills directory of Copilot / Claude Code / Codex. One command handles fetch, registration, and future upgrades.
+Use the [`skills`](https://www.npmjs.com/package/skills) CLI to install this repo as an Agent Skill for Copilot, Claude Code, or Codex. For most users, one command is enough; the extra commands below cover explicit agent targeting and updates.
 
 ```bash
 # Install into the current Agent's default skills directory (auto-detected)
@@ -105,11 +129,11 @@ npx skills add nanzhipro/phase-contract-workflow-skill --force
 npx skills remove phase-contract-workflow -g
 ```
 
-Once installed, just tell the Agent "plan XXX with Phase-Contract" in any session. The Skill's discovery description lives in the [SKILL.md](./SKILL.md) frontmatter.
+Once installed, tell the Agent to plan a project with Phase-Contract in any session. If you want the full scaffolding flow and template behavior, see [SKILL.md](./SKILL.md).
 
 ## Golden loop
 
-Every Phase runs the same loop. You can compress or swap sessions at any breakpoint - re-entering from the top loses nothing.
+The workflow repeats the same simple rhythm. You start or resume, load the current project context, work on the current step, record progress, and continue until the project is ready to close out.
 
 ```text
 advance --strict  →  load 3 docs  →  execute (within execution boundary)
@@ -118,6 +142,8 @@ advance --strict  →  load 3 docs  →  execute (within execution boundary)
                                            ↓
                               (all phases done) → finalize
 ```
+
+### Core commands
 
 A single command kicks off, resumes, or wraps up:
 
@@ -130,34 +156,48 @@ ruby scripts/planctl finalize                          # after every phase succe
 ruby scripts/planctl doctor                            # repo health check (SHA256-diff the three instruction files, etc.)
 ```
 
-Phase boundaries are internal, not user confirmation points. `complete` now runs a hard preflight chain before any state write: dependency checks, `lint-contracts`, required checks declared in `manifest.yaml`, and strict `allowed_paths` enforcement. If any required gate fails or times out, `state.yaml` and `handoff.md` do not move. Optional checks only warn, but their `id / command / exit_code / duration / status / output_tail` are still appended to `completion_log[*].checks`. `complete --continue` then immediately chains into `advance --strict`; if the new current Phase is still a placeholder pair, `advance` returns `ACTION: promote_placeholder`, so promote both contracts to formal docs first. When `advance` returns `ACTION: finalize`, do **not** declare the project finished — `finalize` first runs a hard final gate: every manifest Phase must appear in `completed_phases`, and every Phase must have a `completion_log` entry with `completed_at` plus passing required checks. Only then does the first successful `finalize` write `finalized_at`, refresh `plan/handoff.md`, run `git add -A` → `git commit -F -` → `git push`, and print the final execution dashboard. If any Phase is missing, failed, or ledger-inconsistent, `finalize` exits 2 without writing the ledger or printing the dashboard. Later reruns stay read-only and only regenerate the dashboard. Details live in [references/phase-templates.md](./references/phase-templates.md) and [references/workflow-template.md](./references/workflow-template.md).
+### What the script handles for you
+
+The script does the mechanical parts that are easy for an Agent to get wrong in a long session:
+
+* it checks whether the current step is ready before progress is recorded
+* it keeps the project moving one current step at a time
+* it asks for more detail when a future step is still only a placeholder
+* this means the project is not fully specified upfront and then simply queued for execution; planning and reasoning continue as the current step reveals new constraints and information
+* it only treats the project as finished when the planned work is fully accounted for
+
+The detailed enforcement rules live in [references/phase-templates.md](./references/phase-templates.md) and [references/workflow-template.md](./references/workflow-template.md).
 
 ## Design principles
 
-- **Externalize state** - progress goes to files, not memory.
-- **Separate scheduling from execution** - the script decides _what_, the AI decides _how_.
-- **Three-file context law** - the working window is always `common + phase + execution`.
-- **Two-layer contract** - `phases/*` says _what it is_; `execution/*` says _what may be touched_ - goal and boundary kept orthogonal.
-- **Done means written** - a Phase that is not in `state.yaml` is not done, however eloquently the AI reports otherwise.
-- **Recovery is a first-class citizen** - `handoff.md` is a protocol, not a scratchpad.
-- **Close-out is explicit** - finishing the last Phase is not finishing the project; the first successful `finalize` records the close-out ledger, later reruns stay read-only, and the human still makes the release call.
+* **Put progress where people can inspect it** - in project files, not in a fading conversation.
+* **Keep the current working context small** - a narrow focus is easier for both the Agent and the reviewer.
+* **Separate deciding from doing** - the workflow chooses the current step so the Agent can concentrate on execution.
+* **Make interruptions recoverable** - restarting should feel like resuming a project, not rebuilding memory.
+* **Treat done as something recorded** - completion is a project fact, not a persuasive status update.
 
-Full eight principles, three invariants, failure model, and mitigation mapping: [references/methodology.md](./references/methodology.md).
+Full methodology and design rationale: [references/methodology.md](./references/methodology.md).
 
 ## When to use
 
-**Use it for**: 0-to-1 product builds, framework/SDK migrations, major version upgrades, architecture replacements, long-form documentation projects, compliance remediation, long-pipeline ETL rebuilds.
+### Use it for
 
-**Do not use it for**: single small fixes (too heavy); exploratory research (Phase boundaries cannot be predefined - use a ReAct-style loop instead); stretches where requirements are still unstable and Phases get rewritten repeatedly (stabilize requirements first).
+Use it for 0-to-1 product builds, migrations, major upgrades, architecture replacements, long documentation projects, compliance work, and other efforts where continuity matters more than raw speed.
+
+### Do not use it for
+
+Avoid it for tiny fixes, open-ended exploration, or projects whose requirements are still changing so fast that no stable step sequence exists yet.
 
 ## Prerequisites
 
-- The target repo is a Git worktree (`git rev-parse --is-inside-work-tree` returns `true`). Outside a Git workspace there is no objective basis for Phase-level whitelist diffing or rollback; this is blocked by default. Explicit opt-out only: `PHASE_CONTRACT_ALLOW_NON_GIT=1`.
-- `ruby` 2.6 or newer is available locally. `planctl` is a single-file Ruby script with zero gem dependencies.
+* A Git repository, so the workflow has a trustworthy project history to build on.
+* Ruby 2.6 or newer, which runs the bundled `planctl` script.
 
 ## Quick start
 
-When used as an Agent Skill, just say "plan XXX with Phase-Contract" inside Copilot / Claude Code / Codex. The Skill interactively collects project framing, Phase decomposition, and hard constraints, then generates the full artifact set following the Procedure in [SKILL.md](./SKILL.md):
+When used as an Agent Skill, you can simply ask it to plan a project with Phase-Contract. The Skill then gathers the project framing, breaks the work into steps, and generates the working files described in [SKILL.md](./SKILL.md):
+
+### Generated scaffold
 
 ```text
 <project>/
@@ -175,38 +215,44 @@ When used as an Agent Skill, just say "plan XXX with Phase-Contract" inside Copi
 └── scripts/planctl
 ```
 
-For manual installation into an existing project, copy `scripts/planctl.rb` in and generate the rest from the templates - details in [SKILL.md](./SKILL.md).
+### Manual installation
 
-Only the current Phase needs a formal contract on day one. Future Phases can stay as placeholder pairs until entry, then be promoted when `advance --strict` returns `ACTION: promote_placeholder`.
+For manual installation in an existing project, copy `scripts/planctl.rb` and generate the companion files from the templates described in [SKILL.md](./SKILL.md).
+
+### Placeholder promotion
+
+You do not need to fully define every future step on day one. Only the current step needs full detail; future steps can stay lightweight until it is time to enter them.
+
+More precisely, this workflow is not "fully plan every task first, then execute them in order." It is "establish the overall shape, then keep planning, reasoning, and refining the later steps while the current step is being executed." Placeholder contracts exist to support that pattern: future steps keep their direction and references early, but receive full detail only when they become current.
 
 ## Roadmap
 
-From "no amnesia" (today) toward "no rot" (12-hour autonomy), in priority order:
+The long-term direction is simple: make long AI projects easier to resume, safer to review, and calmer to operate.
 
-1. **Repairable completion transactions** (P0) - split `complete` into explicit checking / writing / committing states so a failed commit or push can be resumed instead of left as a warning.
-2. **Git-level checkpoints and rollback** (P0) - auto-branch and tag each Phase; `complete` merges on green, resets on red; support per-Phase rollback instead of rerunning the whole chain.
-3. **Meta-Phase Replan** (P1) - force a replanning Phase every N execution Phases; manifest edits go through `planctl amend` for an audit trail.
-4. **Contract DAG with parallel execution** (P1) - `next --parallel N` plus Git worktrees; compress a 12 h sequential plan into 6-8 h.
-5. **Targeted context retrieval** (P2) - `planctl context <phase>` pulls relevant excerpts from completed artifacts; forbid the AI from free-form grep.
-6. **Budgets, health, circuit breakers** (P2) - token / time / retry budgets; escalate to a human on repeated failure.
+1. **Safer recovery after partial failure** - so interrupted close-out actions can be resumed cleanly.
+2. **Stronger checkpoints and rollback** - so each step is easier to inspect and reverse when necessary.
+3. **Built-in replanning moments** - so long projects can adjust without losing their history.
+4. **Better support for parallel work** - so large plans do not have to stay fully sequential.
+5. **More targeted context retrieval** - so the next session gets only the context it actually needs.
+6. **Budgets and health controls** - so repeated failure triggers calmer escalation instead of drift.
 
-The evolutionary motto stays the same: **replace "AI self-discipline" with "script enforcement".**
+The guiding idea stays the same: **replace fragile AI self-discipline with dependable project structure.**
 
 ## Documentation map
 
-- [SKILL.md](./SKILL.md) - full scaffolding procedure and quality gates
-- [references/glossary.md](./references/glossary.md) - glossary of concepts and terms (contract chain, three invariants, four failure modes, scheduler commands, adjacent-concept comparison)
-- [references/methodology.md](./references/methodology.md) - complete methodology (three invariants, eight principles, enforcement layer, hard constraints)
-- [references/templates.md](./references/templates.md) - `manifest` / `common` / `state` / `handoff` templates
-- [references/phase-templates.md](./references/phase-templates.md) - two-layer contract templates (positioning + execution)
-- [references/workflow-template.md](./references/workflow-template.md) - `plan/workflow.md` template, rollback and close-out flows
-- [references/agent-instructions-template.md](./references/agent-instructions-template.md) - shared template for the three Agent instruction files
-- [assets/README.md](./assets/README.md) - logo / mark assets and design rationale
-- [CHANGELOG.md](./CHANGELOG.md) - version history
+* [SKILL.md](./SKILL.md) - installation and scaffolding procedure
+* [references/glossary.md](./references/glossary.md) - terminology guide
+* [references/methodology.md](./references/methodology.md) - full design rationale
+* [references/templates.md](./references/templates.md) - core templates
+* [references/phase-templates.md](./references/phase-templates.md) - step templates
+* [references/workflow-template.md](./references/workflow-template.md) - workflow and close-out template
+* [references/agent-instructions-template.md](./references/agent-instructions-template.md) - shared Agent instruction template
+* [assets/README.md](./assets/README.md) - logo assets and design notes
+* [CHANGELOG.md](./CHANGELOG.md) - version history
 
 ## License
 
-Shares the license of the parent Agent Skill library. `scripts/planctl.rb` has no external dependencies and can be copied out and reused standalone.
+This project shares the license of the parent Agent Skill library. `scripts/planctl.rb` has no external dependencies and can also be reused on its own.
 
 <div align="center">
 
