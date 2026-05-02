@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./assets/phase-contract-logo.svg" alt="Phase-Contract Workflow" width="720">
+<img src="./assets/phase-contract-logo.png" alt="Phase-Contract Workflow" width="720">
 
 # Phase-Contract Workflow
 
@@ -253,9 +253,3 @@ The guiding idea stays the same: **replace fragile AI self-discipline with depen
 ## License
 
 This project shares the license of the parent Agent Skill library. `scripts/planctl.rb` has no external dependencies and can also be reused on its own.
-
-<div align="center">
-
-[English](./README.en.md) · [中文](./README.md)
-
-</div>
