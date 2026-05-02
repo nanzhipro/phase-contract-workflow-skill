@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./assets/phase-contract-logo.svg" alt="Phase-Contract Workflow" width="720">
+<img src="./assets/phase-contract-logo.png" alt="Phase-Contract Workflow" width="720">
 
 # Phase-Contract Workflow
 
@@ -253,9 +253,3 @@ ruby scripts/planctl doctor                            # 仓库体检（三份�
 ## 许可证
 
 本项目沿用上层 Agent Skill 库的许可证；`scripts/planctl.rb` 没有外部依赖，也可以单独复用。
-
-<div align="center">
-
-[English](./README.en.md) · **中文**
-
-</div>
