@@ -84,6 +84,72 @@ class PlanctlAutonomousTest < Minitest::Test
     assert_includes out, 'ACTION: promote_placeholder'
   end
 
+  def test_reset_rewinds_workflow_to_origin_after_committed_phase
+    baseline_head = git_output('rev-parse', 'HEAD').strip
+    baseline_handoff = File.read(File.join(@repo, 'plan/handoff.md'))
+
+    complete_phase_with_local_commit('phase-0', 'Phase 0 done.', 'Start phase 1.')
+
+    out, err, status = run_planctl('reset')
+
+    assert status.success?, err
+    assert_equal baseline_head, git_output('rev-parse', 'HEAD').strip
+    assert_equal baseline_handoff, File.read(File.join(@repo, 'plan/handoff.md'))
+    state = YAML.load_file(File.join(@repo, 'plan/state.yaml'))
+    assert_equal [], state['completed_phases']
+    assert_equal [], state['completion_log']
+    refute state.key?('finalized_at')
+    assert_includes out, 'Workflow state is back at the origin.'
+    assert_includes out, 'Next phase: phase-0'
+
+    advance_out, advance_err, advance_status = run_planctl('advance', '--strict')
+    assert advance_status.success?, advance_err
+    assert_includes advance_out, 'PHASE: phase-0'
+  end
+
+  def test_reset_rewinds_finalized_workflow_to_origin
+    baseline_head = git_output('rev-parse', 'HEAD').strip
+    baseline_handoff = File.read(File.join(@repo, 'plan/handoff.md'))
+
+    complete_all_phases_with_local_commits
+    out, err, status = run_planctl(
+      { 'PHASE_CONTRACT_SKIP_PUSH' => '1' },
+      'finalize'
+    )
+    assert status.success?, err
+    refute_equal baseline_head, git_output('rev-parse', 'HEAD').strip
+
+    out, err, status = run_planctl('reset')
+
+    assert status.success?, err
+    assert_equal baseline_head, git_output('rev-parse', 'HEAD').strip
+    assert_equal baseline_handoff, File.read(File.join(@repo, 'plan/handoff.md'))
+    state = YAML.load_file(File.join(@repo, 'plan/state.yaml'))
+    assert_equal [], state['completed_phases']
+    assert_equal [], state['completion_log']
+    refute state.key?('finalized_at')
+    assert_includes out, 'Workflow state is back at the origin.'
+  end
+
+  def test_reset_clears_uncommitted_workflow_ledgers_back_to_origin
+    baseline_head = git_output('rev-parse', 'HEAD').strip
+    baseline_handoff = File.read(File.join(@repo, 'plan/handoff.md'))
+
+    complete_all_phases_with_skip_commit
+
+    out, err, status = run_planctl('reset')
+
+    assert status.success?, err
+    assert_equal baseline_head, git_output('rev-parse', 'HEAD').strip
+    assert_equal baseline_handoff, File.read(File.join(@repo, 'plan/handoff.md'))
+    state = YAML.load_file(File.join(@repo, 'plan/state.yaml'))
+    assert_equal [], state['completed_phases']
+    assert_equal [], state['completion_log']
+    refute state.key?('finalized_at')
+    assert_includes out, 'No planctl workflow commits found'
+    assert_includes out, 'Next phase: phase-0'
+  end
+
   def test_finalize_first_run_records_ledger_and_creates_commit
     complete_all_phases_with_skip_commit
 
@@ -357,6 +423,21 @@ class PlanctlAutonomousTest < Minitest::Test
   def run_planctl(*args)
     env = args.first.is_a?(Hash) ? args.shift : {}
     Open3.capture3(env, 'ruby', 'scripts/planctl', *args, chdir: @repo)
+  end
+
+  def complete_phase_with_local_commit(phase_id, summary, next_focus)
+    out, err, status = run_planctl(
+      { 'PHASE_CONTRACT_SKIP_PUSH' => '1' },
+      'complete', phase_id,
+      '--summary', summary,
+      '--next-focus', next_focus
+    )
+    raise "#{phase_id} complete failed: #{err}\n#{out}" unless status.success?
+  end
+
+  def complete_all_phases_with_local_commits
+    complete_phase_with_local_commit('phase-0', 'Phase 0 done.', 'Start phase 1.')
+    complete_phase_with_local_commit('phase-1', 'Phase 1 done.', 'Finalize execution.')
   end
 
   def complete_all_phases_with_skip_commit

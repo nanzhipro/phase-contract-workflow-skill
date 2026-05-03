@@ -241,6 +241,59 @@ class PlanCtl
     end
   end
 
+  # Reset the entire workflow back to its origin.
+  #
+  # If planctl has already created milestone / finalization / revert commits,
+  # reset HEAD to the parent of the oldest such commit so the repository lands
+  # on the pre-workflow baseline again. If the workflow only touched the
+  # working tree without creating a milestone commit, restore tracked files to
+  # HEAD and delete any untracked ledger files. In both cases, the resulting
+  # state should behave like a fresh phase-0 start.
+  def reset
+    ensure_git_repo!
+    workflow_commit = first_workflow_commit
+
+    if workflow_commit && !workflow_commit.empty?
+      target_commit = capture_git_silent('rev-parse', "#{workflow_commit}^").strip
+      if target_commit.empty?
+        warn "[planctl] Cannot reset workflow before #{workflow_commit[0, 10]}: no parent commit found."
+        warn '[planctl] Create a clean baseline commit before running the workflow, then retry reset.'
+        exit 2
+      end
+
+      unless run_git('reset', '--hard', target_commit)
+        warn "[planctl] git reset --hard #{target_commit} failed."
+        exit 2
+      end
+
+      puts "[planctl] Workflow reset to origin commit #{target_commit[0, 10]} (before #{workflow_commit[0, 10]})."
+      puts '[planctl] History was rewritten; if this branch is shared, push manually with: git push --force-with-lease'
+    else
+      unless run_git('reset', '--hard', 'HEAD')
+        warn '[planctl] git reset --hard HEAD failed.'
+        exit 2
+      end
+
+      puts '[planctl] No planctl workflow commits found; restored tracked files to HEAD.'
+    end
+
+    removed = remove_untracked_workflow_ledgers!
+    unless removed.empty?
+      puts "[planctl] Removed untracked workflow ledger files: #{removed.join(', ')}"
+    end
+
+    status = build_status_result(load_state)
+    puts 'Workflow state is back at the origin.'
+    puts "State file: #{state_file_relative}"
+    puts "Handoff file: #{handoff_file_relative}"
+    if status['next_phase']
+      next_phase = status['next_phase']
+      puts "Next phase: #{next_phase['phase_id']} (#{next_phase['title']}). Run: ruby scripts/planctl advance --strict"
+    else
+      puts 'Next phase: none'
+    end
+  end
+
   # Revert a previously completed phase:
   #   1. Locate its milestone commit via `git log --grep "Phase-Id: <id>"`.
   #   2. Either `git revert` (default, safe) or `git reset --hard` that commit.
@@ -605,7 +658,7 @@ class PlanCtl
     return if git_work_tree?
 
     warn '[planctl] warning: current directory is not a git work tree.'
-    warn "[planctl] warning: `advance` / `next` / `resolve` / `complete` / `handoff` will refuse to run (exit #{GIT_GUARD_EXIT_CODE}) until a git baseline exists."
+    warn "[planctl] warning: `advance` / `next` / `resolve` / `complete` / `revert` / `reset` / `handoff` / `resume` / `finalize` will refuse to run (exit #{GIT_GUARD_EXIT_CODE}) until a git baseline exists."
     warn "[planctl] warning: see `plan/workflow.md` for the `git init` instructions or set #{GIT_OPT_OUT_ENV}=1 to opt out explicitly."
   end
 
@@ -1165,6 +1218,20 @@ class PlanCtl
     ''
   end
 
+  def git_tracks_path?(relative_path)
+    system('git', '-C', @repo_root.to_s, 'ls-files', '--error-unmatch', relative_path, out: File::NULL, err: File::NULL)
+  end
+
+  def remove_untracked_workflow_ledgers!
+    [[state_file_relative, state_file_path], [handoff_file_relative, handoff_file_path]].each_with_object([]) do |(relative_path, absolute_path), removed|
+      next if git_tracks_path?(relative_path)
+      next unless absolute_path.file? || absolute_path.symlink?
+
+      File.delete(absolute_path)
+      removed << relative_path
+    end
+  end
+
   # Like `capture_git`, but discards stderr. Intended for queries whose
   # absence is a normal signal (e.g. `rev-parse @{u}` when no upstream is
   # configured) so the dashboard does not surface raw git error text.
@@ -1643,6 +1710,16 @@ class PlanCtl
 
   def manifest_phases
     Array(@manifest['phases'])
+  end
+
+  def first_workflow_commit
+    capture_git(
+      'log',
+      '--reverse',
+      '--format=%H',
+      '--grep=^Automated-By: scripts/planctl (complete|finalize|revert)$',
+      '-E'
+    ).split("\n").find { |line| !line.strip.empty? }
   end
 
   def load_state(create_if_missing: false)
@@ -2153,6 +2230,7 @@ def usage
       ruby scripts/planctl status [--format text|json]
       ruby scripts/planctl lint-contracts [--phase <phase-id> | --all]
       ruby scripts/planctl complete <phase-id> [--summary TEXT] [--next-focus TEXT] [--continue]
+      ruby scripts/planctl reset
       ruby scripts/planctl revert <phase-id> [--mode revert|reset] [--summary TEXT]
       ruby scripts/planctl handoff [--format prompt|json] [--write]
       ruby scripts/planctl resume [--strict]
@@ -2248,6 +2326,14 @@ when 'complete'
     exit 1
   end
   planctl.complete(phase_id, summary: options[:summary], next_focus: options[:next_focus], continue_run: options[:continue])
+when 'reset'
+  parser = OptionParser.new { |opts| opts.banner = usage }
+  parser.parse!(ARGV)
+  if ARGV.any?
+    warn parser.to_s
+    exit 1
+  end
+  planctl.reset
 when 'revert'
   options = { mode: 'revert', summary: nil }
   parser = OptionParser.new do |opts|

@@ -179,6 +179,9 @@ ruby scripts/planctl lint-contracts --phase <phase-id>
 # 实施该 phase 后标记完成（自动刷新 handoff、并 git add -A / commit / push 本 phase 的里程碑）
 ruby scripts/planctl complete <phase-id> --summary "<做了什么>" --next-focus "<下一个 phase 要关注什么>" --continue
 
+# 若整条 workflow 要整体回到 phase-0，运行 reset（会回退 planctl 里程碑历史）
+ruby scripts/planctl reset
+
 # complete --continue 会立刻运行 advance；若 ACTION: promote_placeholder，先补正式合同，再重跑 advance
 # 当 advance 返回 ACTION: finalize 时，跑一次 finalize 收尾，不要直接收工
 ruby scripts/planctl finalize
@@ -213,6 +216,7 @@ ruby scripts/planctl doctor
 - `complete --continue` 之后必须立刻服从 `advance` 的下一 `ACTION`；若返回 `promote_placeholder`，先升级该 phase 的两份合同，不要停下来问用户是否继续
 - 未写入 `state.yaml` 的 phase 不视为完成，不管 AI 自己说做得多好
 - 当 `advance` / `complete --continue` 输出 `ACTION: finalize` 或 “All phases are completed”，下一动作不是直接对人类宣告项目结束，而是跑 `ruby scripts/planctl finalize`，把仪表盘和决策权按 Step 8 交还人类
+- 若用户明确要求“整条 plan 重来 / 回到 phase-0 / 全流程 reset”，直接执行 `ruby scripts/planctl reset`；不要手改 `state.yaml`，也不要手写一串 `git reset`。该命令会整体回退 workflow 到原点。若当前分支已推到远端，需要在汇报里明确提示用户后续手动 `git push --force-with-lease`
 
 ### Step 7: 里程碑提交与推送（`complete` 自动执行）
 

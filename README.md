@@ -152,9 +152,12 @@ ruby scripts/planctl advance --strict                  # 新会话 / 日常推�
 ruby scripts/planctl resume --strict                   # 压缩后冷启动
 ruby scripts/planctl lint-contracts --phase <id>       # 实施前或 complete 前检查当前正式合同
 ruby scripts/planctl complete <id> --summary "..." --next-focus "..." --continue
+ruby scripts/planctl reset                             # 整条 workflow 回到起点；会回退 planctl 里程碑历史，共享分支需手动 force push
 ruby scripts/planctl finalize                          # 全部 phase 成功后写最终 ledger + git 收尾，然后输出全计划仪表盘
 ruby scripts/planctl doctor                            # 仓库体检（三份指令 SHA256 比对等）
 ```
+
+如果这条 plan 需要整体作废、重来，直接运行 `ruby scripts/planctl reset`。它会把 `plan/state.yaml`、`plan/handoff.md` 和 planctl 自动生成的 phase / finalize 里程碑一起退回 workflow 原点；若当前还没有任何 planctl 里程碑 commit，则回到当前 `HEAD` 的基线并清掉未提交 ledger。
 
 ### 脚本会替你兜住什么
 

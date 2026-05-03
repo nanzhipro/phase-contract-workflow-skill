@@ -68,6 +68,11 @@
   (history-rewriting, left unpushed for manual `--force-with-lease`), and
   rewriting `state.yaml` + `plan/handoff.md`. Refuses to revert a phase
   that still has completed downstream dependencies.
+- `planctl reset` — rewinds the entire workflow to its origin. If planctl
+  milestone / finalize / revert commits exist, it hard-resets to the
+  parent of the oldest such commit so `advance --strict` resolves phase-0
+  again. If no planctl commit exists yet, it restores tracked files to the
+  current `HEAD` baseline and removes untracked workflow ledger files.
 - `planctl resume [--strict]` — one-shot cold-start command for
   context-compressed or fresh sessions. Prints the project header,
   handoff snapshot, and the same autonomous `advance` ACTION used by the

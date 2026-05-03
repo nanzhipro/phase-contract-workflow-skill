@@ -152,9 +152,12 @@ ruby scripts/planctl advance --strict                  # new session / daily dri
 ruby scripts/planctl resume --strict                   # cold start after compression
 ruby scripts/planctl lint-contracts --phase <id>       # verify the current formal contract before implementation or before complete
 ruby scripts/planctl complete <id> --summary "..." --next-focus "..." --continue
+ruby scripts/planctl reset                             # return the whole workflow to its origin; rewrites planctl milestone history, so shared branches need a manual force push
 ruby scripts/planctl finalize                          # after every phase succeeds, write finalization ledger + git close-out, then print the dashboard
 ruby scripts/planctl doctor                            # repo health check (SHA256-diff the three instruction files, etc.)
 ```
+
+If the whole plan needs to be abandoned and restarted from phase-0, run `ruby scripts/planctl reset`. It rewinds `plan/state.yaml`, `plan/handoff.md`, and any planctl-created phase/finalization milestones back to the workflow origin; if no planctl milestone commit exists yet, it falls back to the current `HEAD` baseline and removes any uncommitted ledger files.
 
 ### What the script handles for you
 
