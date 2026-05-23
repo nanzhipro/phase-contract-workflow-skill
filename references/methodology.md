@@ -75,13 +75,14 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
 │   ├── execution/phase-X.md     # ④ 执行合同：允许改 / 禁止改 / 交付检查
 │   ├── state.yaml               # ⑤ 执行账本（脚本写入，勿手改）
 │   ├── handoff.md               # ⑥ 压缩恢复锚点（脚本写入，勿手改）
+│   ├── journal/phase-X.jsonl    # ⑦ Phase 级 append-only event log（Session 层）
 │   └── workflow.md              # （说明文档，可选）
 ├── scripts/
-│   └── planctl                  # ⑦ 唯一流程入口
+│   └── planctl                  # ⑧ 唯一流程入口
 └── .github/
-    └── copilot-instructions.md  # ⑧' 仓库级 AI 硬约束（Copilot）
-├── CLAUDE.md                    # ⑧'' 同上（Claude Code，内容一致）
-└── AGENTS.md                    # ⑧''' 同上（Codex / 通用 agent，内容一致）
+    └── copilot-instructions.md  # ⑨' 仓库级 AI 硬约束（Copilot）
+├── CLAUDE.md                    # ⑨'' 同上（Claude Code，内容一致）
+└── AGENTS.md                    # ⑨''' 同上（Codex / 通用 agent，内容一致）
 ```
 
 ### 各制品职责详解
@@ -92,8 +93,9 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
 | common | 整个项目永远不允许违反的规则是什么？ | 启动时写一次，极少改 | 人类 |
 | phases/phase-X | 这个阶段要达到什么状态？怎么算完成？ | 进入该 phase 前写 | 人类 / AI 辅助 |
 | execution/phase-X | 这次实施可以碰什么、不能碰什么、怎么验收？ | 进入该 phase 前写 | 人类 / AI 辅助 |
-| state | 到目前为止完成了什么？ | 每个 phase 完成时写 | **脚本** |
+| state | 到目前为止完成了什么？当前 phase 跑到哪一步了？ | 每次 phase 推进 / 完成时写 | **脚本** |
 | handoff | 压缩后要怎么继续？下一步读什么？ | 每个 phase 完成时写 | **脚本** |
+| journal/phase-X.jsonl | 当前 phase 内发生了什么事件？（phase_start / check / gate_failed / agent_note / complete_stage） | phase 推进时 append；agent 用 `planctl note` 也可追加 | **脚本 + agent note** |
 | planctl | — | 启动时实现一次 | 人类（可直接复用现成实现） |
 | copilot-instructions / CLAUDE / AGENTS | AI 开会话时要先做什么？（三份同步） | 启动时写一次 | 人类 |
 
@@ -182,9 +184,12 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
 |------|------|------|------|
 | `resolve <phase-id>` | phase id | 该 phase 的 required_context + 依赖检查结果 | 单 phase 启动 |
 | `next` | — | 下一个未完成且依赖满足的 phase | 连续推进 |
-| `advance` | — | 下一内部动作（implement / promote_placeholder / finalize / stop） | 自动续跑状态机 |
+| `advance` | — | 下一内部动作（implement / promote_placeholder / finalize / stop），并在 implement 时自动写入 `current_phase` 与 phase_start journal 事件 | 自动续跑状态机 |
 | `status` | — | 已完成 / 可执行 / 被阻塞三组清单 | 总览 |
-| `complete <phase-id> --continue` | summary + next_focus | 写入 state.yaml + 刷新 handoff.md + 继续 advance | 标记完成并自动续跑 |
+| `complete <phase-id> --continue` | summary + next_focus | 跑 gate → 写入 state.yaml + handoff.md + journal complete_stage → git milestone → 继续 advance | 标记完成并自动续跑 |
+| `note <text>` | text | 在 current phase 的 journal 追加一条 `agent_note` 事件 | phase 实施期间的 agent 决策 / 试错 / 待办外部化 |
+| `repair-complete` | — | 根据 `current_phase.stage` 幂等重放未完成的 commit / push | `complete` 中段被打断时的恢复入口 |
+| `resume [--brief]` | — | 项目概览 + handoff 快照 + current phase journal tail + 下一 ACTION | 压缩 / 新会话冷启动 |
 | `handoff --write` | — | 手动重放 handoff.md | 手动补救，不在常规 loop 里 |
 
 **三个硬要求**：
@@ -237,6 +242,14 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
 ```
 
 **压缩/新会话中断点**：任何时刻被压缩，**从 [0] 重新插入即可无损续跑**。这是连续工作 5+ 小时的机械保障。
+
+**压缩发生在 phase 中段**：当 `state.yaml` 含 `current_phase` 时，表示上一会话尚未完成当前 phase 的实施。新会话应：
+
+1. 先跑 `ruby scripts/planctl repair-complete`：若 `current_phase.stage` 为 `state_written` / `committed`，脚本会幂等重放 git 收尾；否则 no-op。
+2. 再跑 `ruby scripts/planctl resume --strict`：除 handoff 快照外，额外打印 `Current phase journal (last 30 events)`，恢复 phase 内推理链与中断点。
+3. 续跑期间可继续用 `planctl note "<text>"` 把新的决策、试错和待办追加进 journal，再次压缩仍可恢复。
+
+这条路径让 phase 内的 30–90 分钟工作也具备 crash-safety，而不只是在 phase 边界续跑。
 
 ---
 

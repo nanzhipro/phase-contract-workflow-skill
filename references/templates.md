@@ -215,9 +215,22 @@ completed_phases: []
 completion_log: []
 updated_at: null
 finalized_at: null
+# current_phase 字段仅在 phase 实施中段出现；planctl 自动写入和清理：
+# current_phase:
+#   phase_id: phase-X
+#   started_at: "2026-05-23T10:00:00Z"
+#   session_id: a1b2c3d4
+#   attempts: 1
+#   stage: implementing  # implementing | state_written | committed
 ```
 
-**注意**：此文件由 `planctl complete` 与首次成功的 `planctl finalize` 写入，人类禁止手改。successful `complete` 会把 phase 级 check 摘要写进 `completion_log[*].checks`，每条记录至少包含 `id`、`command`、`exit_code`、`duration_seconds`、`status` 和 `output_tail`。required check 失败时不会写入 `state.yaml`；optional check 失败会 warning，但仍随成功 phase 记录写进 ledger。`finalize` 只有在全部 manifest phase 都已完成且每个 phase 都有成功 completion log 证据时才会写 `finalized_at` 并输出仪表盘；否则 exit 2 且不写 ledger。重复 finalize 保持只读。
+**注意**：此文件由 `planctl complete` 与首次成功的 `planctl finalize` 写入，人类禁止手改。
+
+- `current_phase` 在 `advance` 决定 `ACTION: implement` 时自动创建，phase 完成后由 `complete` 清除。`stage` 字段标记 `complete` 流程跑到了哪一步，是 `repair-complete` 重放未完成 commit/push 的依据。
+- successful `complete` 会把 phase 级 check 摘要写进 `completion_log[*].checks`，每条记录至少包含 `id`、`command`、`exit_code`、`duration_seconds`、`status` 和 `output_tail`；同时把 `started_at`、`elapsed_seconds`、`attempts`、`session_id` 也落入对应 completion_log 条目，便于 finalize 仪表盘和后续健康度评估使用。
+- required check 失败时不会写入 `completed_phases` / `completion_log`，但 `current_phase.attempts` 会自增并落盘——这让 retry 次数成为可观测信号。
+- optional check 失败会 warning，但仍随成功 phase 记录写进 ledger。
+- `finalize` 只有在全部 manifest phase 都已完成且每个 phase 都有成功 completion log 证据时才会写 `finalized_at` 并输出仪表盘；否则 exit 2 且不写 ledger。重复 finalize 保持只读。
 
 ---
 

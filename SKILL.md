@@ -47,8 +47,9 @@ argument-hint: "(optional) target project path and short project description"
 │   ├── manifest.yaml            # 流程清单（phase 顺序 + depends_on + required_context）
 │   ├── common.md                # 全局硬约束（所有 phase 必带）
 │   ├── workflow.md              # 流程说明
-│   ├── state.yaml               # 执行账本（脚本写入）
+│   ├── state.yaml               # 执行账本（脚本写入，含 current_phase 实时状态）
 │   ├── handoff.md               # 压缩恢复锚点（脚本写入）
+│   ├── journal/                 # Phase 内 append-only event log，phase 推进时自动追加
 │   ├── phases/
 │   │   └── phase-0-<name>.md    # 定位合同模板
 │   └── execution/
@@ -105,17 +106,39 @@ argument-hint: "(optional) target project path and short project description"
 
 4. 若 `PHASE_CONTRACT_ALLOW_NON_GIT=1` 已显式设置，允许跳过此门禁，但必须在后续 Step 2 生成 `plan/common.md` 时强制写入“非 git 工作区偏离”风险段落（编号的独立段），明确列出：偏离原因、手动回滚方案、改动审计方式。
 
-### Step 1: 收集输入
+### Step 1: 收集输入（默认自主完成，不触发交互提问）
 
-如果用户未指定，使用 ask-questions 工具逐项收集：
+默认**不要**调用 ask-questions、ask user 或任何交互式提问 UI 来补齐输入。Phase-Contract 的默认模式是无人值守也能落地脚手架：优先从当前请求、工作区和仓库现状中自行推断，并把关键假设写进生成结果。
+
+只有在用户**明确要求互动式规划**时，才允许进入提问模式，例如用户明确说了“先问我几个问题”“让我自己选 phase 切分”“interactive / interview mode”。除此之外，一律按下面顺序自主补齐：
+
+1. 用户当前请求里已经写明的信息
+2. 显式给出的路径、仓库名、目标描述
+3. 当前工作区根目录 / 当前仓库根目录
+4. README、现有计划文件、构建配置、测试配置、目录结构
+5. 从代码和文件命名中可客观推断出的项目形态
+
+需要补齐的五类输入仍然是：
 
 1. **项目根目录路径**（绝对路径）
+   - 优先使用用户显式给出的路径；否则使用当前工作区中最相关的仓库根目录。
 2. **项目一句话定位**（写入 common.md 和 manifest）
+   - 先从用户请求提炼；若请求过于简短，再结合 README、目录名和现有脚本职责压成一句客观描述。
 3. **切分主维度**：按模块 / 按层次 / 按章节 / 按控制项 / 按迁移波次（必须选一，不能混用）
+   - 迁移、升级、替换类工作优先用“按迁移波次”。
+   - 文档、课程、长文写作类工作优先用“按章节”。
+   - 合规、治理、审计类工作优先用“按控制项”。
+   - 工程实现类工作优先在“按模块”和“按层次”之间二选一：边界清晰用“按模块”，否则用“按层次”。
 4. **初始 phase 列表**：phase id + 一句话标题 + depends_on（5–12 个为宜）
+   - 由 Agent 直接生成第一版，不要把“phase 应该怎么拆”回抛给用户做选择题。
 5. **全局硬约束**：技术栈版本、依赖禁区、质量底线、非目标（5–10 条，够锋利即可）
+   - 先从锁文件、CI、README、脚本、现有约束文档中提炼；缺失处再补最保守的工程默认值。
 
-写不出客观完成判定、Runtime Evidence 或 Failure Modes 的 phase，就是切错了，当场要求用户改切分。
+若某一项无法高置信推断，选择**最保守、最可回滚**的默认值继续生成，并在 `plan/common.md` 或 `plan/workflow.md` 中单列“Scaffold assumptions”段落写清楚。
+
+若提问工具已经被调用，但返回“用户不可用”“稍后审阅”“work autonomously and make good decisions”之类的无人值守信号，立即停止继续追问，切回自主推断流程；不得把这类占位回复原样写进计划。
+
+写不出客观完成判定、Runtime Evidence 或 Failure Modes 的 phase，就是切错了；直接改用更稳的主维度重切，不要把切分责任默认丢回给用户。只有当用户明确要求自己决策时，才把切分选项交给用户确认。
 
 ### Step 2: 生成骨架文件
 
@@ -170,11 +193,14 @@ ruby scripts/planctl advance --strict
 告诉用户后续每一圈的循环命令（Golden Loop）：
 
 ```bash
-# 查看下一步（连续执行状态机）
+# 查看下一步（连续执行状态机）；ACTION: implement 时会自动写入 current_phase + 启动 journal
 ruby scripts/planctl advance --strict
 
 # 在实施前或改完合同后做当前 phase 的合同 lint
 ruby scripts/planctl lint-contracts --phase <phase-id>
+
+# 实施过程中：把关键决策 / 试错 / 待办追加进 phase journal,便于压缩续跑（按需）
+ruby scripts/planctl note "<决策或试错的一句话>"
 
 # 实施该 phase 后标记完成（自动刷新 handoff、并 git add -A / commit / push 本 phase 的里程碑）
 ruby scripts/planctl complete <phase-id> --summary "<做了什么>" --next-focus "<下一个 phase 要关注什么>" --continue
@@ -183,6 +209,14 @@ ruby scripts/planctl complete <phase-id> --summary "<做了什么>" --next-focus
 # 当 advance 返回 ACTION: finalize 时，跑一次 finalize 收尾，不要直接收工
 ruby scripts/planctl finalize
 ```
+
+**`complete` 中段被打断的恢复入口**：若 `complete` 跑到一半因为进程崩溃、网络挂掉或 pre-commit hook 报错而退出，下一会话开头先跑：
+
+```bash
+ruby scripts/planctl repair-complete
+```
+
+脚本会按 `state.yaml.current_phase.stage`（`state_written` / `committed`）幂等重放剩余的 git commit / push 步骤，把 ledger 和 git 历史重新对齐。没有进行中完成时是 no-op，可以放在恢复流程开头无副作用。**不要**手工 `git commit` / `git push` 或编辑 `state.yaml` 来"修齐"。
 
 > 注：`complete` 已自动 `write_state` → `write_handoff_file`（均为 tmp+rename 原子写入）。`ruby scripts/planctl handoff --write` 仅作为**手动补救**：比如你手改了 `state.yaml` 但忘了别的联动刷新，或 `complete` 后 `handoff.md` 被意外编辑需要重放。正常循环不需要多这一步。
 
@@ -194,7 +228,13 @@ ruby scripts/planctl finalize
 ruby scripts/planctl resume --strict
 ```
 
-输出包含项目概览、handoff 快照和下一步 `ACTION`，足以让任意 agent 在单次读取中恢复全部上下文并继续 Golden Loop。
+输出包含项目概览、handoff 快照和下一步 `ACTION`，足以让任意 agent 在单次读取中恢复全部上下文并继续 Golden Loop。当 `state.yaml` 中存在 `current_phase`（上一会话压缩在 phase 中段），`resume` 还会额外输出 `Current phase journal (last 30 events)`，把 phase 内的推理链、试错记录、checks 结果一次性带回新会话——这让 phase 内续跑也具备 crash-safety，而不只是在 phase 边界续跑。
+
+若刚发生压缩、context 余量紧张，可以加 `--brief` 拿最小化输出（只含项目名 + 下一 ACTION + required_context 路径）：
+
+```bash
+ruby scripts/planctl resume --strict --brief
+```
 
 **仓库体检**：怀疑三份 agent 指令失步、manifest 引用断裂或 state 与 handoff 不一致时，运行：
 

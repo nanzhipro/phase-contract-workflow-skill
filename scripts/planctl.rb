@@ -5,6 +5,7 @@ require 'json'
 require 'optparse'
 require 'open3'
 require 'pathname'
+require 'securerandom'
 require 'time'
 require 'yaml'
 
@@ -14,8 +15,18 @@ class PlanCtl
   SKIP_COMMIT_ENV = 'PHASE_CONTRACT_SKIP_COMMIT'
   ENFORCE_PATHS_ENV = 'PHASE_CONTRACT_ENFORCE_PATHS'
   GIT_GUARD_EXIT_CODE = 3
-  ALWAYS_ALLOWED_PATHS = %w[plan/state.yaml plan/handoff.md .gitignore].freeze
+  ALWAYS_ALLOWED_PATHS = %w[plan/state.yaml plan/handoff.md plan/journal/*.jsonl .gitignore].freeze
   STATE_SCHEMA_VERSION = 1
+  JOURNAL_DIR = 'plan/journal'
+  JOURNAL_TAIL_DEFAULT = 30
+  SESSION_ID_ENV = 'PHASE_CONTRACT_SESSION_ID'
+  # Phase in-progress stages tracked in state['current_phase']['stage'].
+  # `implementing` covers gate-failure retries; transitions to `state_written`
+  # and `committed` happen inside a successful `complete` and let
+  # `repair-complete` know exactly where a crash interrupted the flow.
+  PHASE_STAGE_IMPLEMENTING = 'implementing'
+  PHASE_STAGE_STATE_WRITTEN = 'state_written'
+  PHASE_STAGE_COMMITTED = 'committed'
   PLACEHOLDER_SENTINELS = %w[PHASE_CONTRACT_PLACEHOLDER PHASE-CONTRACT-PLACEHOLDER].freeze
   PLACEHOLDER_HEADER_LINE_LIMIT = 40
   PLACEHOLDER_HINT_PATTERNS = [
@@ -170,17 +181,27 @@ class PlanCtl
       return
     end
 
-    contract_lint = run_contract_lint_check(phase)
+    attempt_number = bump_current_phase_attempt!(state, phase_id)
+    journal_append(phase_id, 'complete_start', 'attempt' => attempt_number)
+
+    contract_lint = run_contract_lint_check(phase, journal_phase_id: phase_id)
     unless contract_lint['status'] == 'passed'
       warn "[planctl] contract lint failed for #{phase_id}."
       warn contract_lint['output_tail'] unless blank?(contract_lint['output_tail'])
+      journal_append(phase_id, 'gate_failed', 'check_id' => 'contract-lint', 'attempt' => attempt_number)
       exit 2
     end
 
-    required_results = run_declared_checks(phase, kind: 'required')
+    required_results = run_declared_checks(phase, kind: 'required', journal_phase_id: phase_id)
     failed_required = required_results.reject { |result| result['status'] == 'passed' }
     unless failed_required.empty?
       failed_required.each { |result| warn format_check_failure(result, required: true) }
+      journal_append(
+        phase_id,
+        'gate_failed',
+        'attempt' => attempt_number,
+        'failed_required_checks' => failed_required.map { |r| r['id'] }
+      )
       exit 2
     end
 
@@ -189,10 +210,11 @@ class PlanCtl
     # the git history. Works best-effort when git is disabled — enforcement
     # simply no-ops because we can't diff.
     unless precheck_allowed_paths!(phase)
+      journal_append(phase_id, 'gate_failed', 'check_id' => 'allowed_paths', 'attempt' => attempt_number)
       exit 2
     end
 
-    optional_results = run_declared_checks(phase, kind: 'optional')
+    optional_results = run_declared_checks(phase, kind: 'optional', journal_phase_id: phase_id)
     optional_results.reject { |result| result['status'] == 'passed' }.each do |result|
       warn format_check_failure(result, required: false)
     end
@@ -201,12 +223,18 @@ class PlanCtl
     ordered = manifest_phases.map { |entry| entry['id'] }.select { |id| completed.include?(id) }
     completion_log = Array(state['completion_log'])
     timestamp = Time.now.utc.iso8601
+    started_at = state.dig('current_phase', 'started_at')
+    elapsed_seconds = compute_elapsed_seconds(started_at, timestamp)
     completion_entry = {
       'phase_id' => phase_id,
       'completed_at' => timestamp
     }
     completion_entry['summary'] = summary unless blank?(summary)
     completion_entry['next_focus'] = next_focus unless blank?(next_focus)
+    completion_entry['started_at'] = started_at unless blank?(started_at.to_s)
+    completion_entry['elapsed_seconds'] = elapsed_seconds unless elapsed_seconds.nil?
+    completion_entry['attempts'] = attempt_number if attempt_number.positive?
+    completion_entry['session_id'] = current_session_id
     completion_entry['checks'] = [contract_lint, *required_results, *optional_results] unless [contract_lint, *required_results, *optional_results].empty?
     completion_log << completion_entry
 
@@ -216,14 +244,34 @@ class PlanCtl
       'completion_log' => completion_log,
       'updated_at' => timestamp
     )
+    # current_phase carries forward into write_state so a crash between the
+    # state write and the git commit leaves a recoverable breadcrumb for
+    # repair-complete: stage=state_written + phase_id in completed_phases
+    # means "ledger ahead of git, replay the commit".
+    if new_state['current_phase'].is_a?(Hash)
+      new_state['current_phase'] = new_state['current_phase'].merge('stage' => PHASE_STAGE_STATE_WRITTEN)
+    end
 
     write_state(new_state)
     write_handoff_file(new_state)
+    journal_append(phase_id, 'complete_stage', 'stage' => PHASE_STAGE_STATE_WRITTEN)
     puts "Marked complete: #{phase_id}"
     puts "Updated state file: #{state_file_relative}"
     puts "Updated handoff file: #{handoff_file_relative}"
 
-    commit_and_push_milestone!(phase_id, phase['title'], summary, next_focus)
+    commit_result = commit_and_push_milestone!(phase_id, phase['title'], summary, next_focus)
+    if commit_result == :committed
+      new_state['current_phase'] = new_state['current_phase'].merge('stage' => PHASE_STAGE_COMMITTED) if new_state['current_phase'].is_a?(Hash)
+      write_state(new_state)
+      journal_append(phase_id, 'complete_stage', 'stage' => PHASE_STAGE_COMMITTED)
+    end
+
+    # Always clear current_phase on a successful pre-git path: the phase has
+    # been counted as complete in completed_phases, and any push trouble is
+    # advisory (warn-only). repair-complete can retry the push, but the
+    # phase boundary is closed.
+    clear_current_phase!(new_state)
+    journal_append(phase_id, 'complete_done')
 
     # Hint the agent toward the next Golden-Loop step so a fresh session
     # does not have to re-derive it from the manifest.
@@ -380,19 +428,39 @@ class PlanCtl
 
   # Cold-start macro: prints everything an AI agent needs to resume work
   # after a compression / fresh session. Combines manifest overview,
-  # handoff snapshot, and the autonomous `advance` result in one shot so
-  # the agent does not have to orchestrate multiple calls.
-  def resume(strict:)
+  # handoff snapshot, the current phase's journal tail (when in flight),
+  # and the autonomous `advance` result in one shot so the agent does not
+  # have to orchestrate multiple calls.
+  #
+  # `--brief` strips the handoff snapshot and journal tail to a minimal
+  # cue (phase id + ACTION + required_context). Useful when context budget
+  # is tight right after a compression event.
+  def resume(strict:, brief: false)
     warn_if_not_git_repo
     state = load_state
     snapshot = build_handoff_snapshot(state)
+    current = state['current_phase']
+    in_flight = current.is_a?(Hash) && !blank?(current['phase_id'].to_s)
 
     puts '=== Phase-Contract Resume ==='
     puts "Project: #{@manifest['project'] || '(unnamed)'}"
+    if brief
+      puts "Repository: #{@repo_root}"
+      puts
+      result = build_advance_result(state)
+      puts '--- Next action ---'
+      render_advance(result, 'prompt')
+      exit(2) if strict && result['action'] == 'stop'
+      return
+    end
+
     puts "Repository: #{@repo_root}"
     puts "State file: #{snapshot['state_file']}"
     puts "Handoff file: #{snapshot['handoff_file']}"
     puts "Updated at: #{snapshot['updated_at'] || 'not recorded yet'}"
+    if in_flight
+      puts "Current phase in flight: #{current['phase_id']} (stage=#{current['stage']}, attempts=#{current['attempts']}, started_at=#{current['started_at']})"
+    end
     puts
     puts "Read these files first (compression-safe resume order):"
     snapshot['resume_read_order'].each_with_index { |p, i| puts "  #{i + 1}. #{p}" }
@@ -400,21 +468,159 @@ class PlanCtl
     puts "--- Handoff snapshot ---"
     render_handoff(snapshot, 'prompt')
     puts
+    if in_flight
+      puts "--- Current phase journal (last #{JOURNAL_TAIL_DEFAULT} events) ---"
+      events = tail_journal(current['phase_id'], JOURNAL_TAIL_DEFAULT)
+      if events.empty?
+        puts '(no journal events recorded yet)'
+      else
+        events.each do |event|
+          puts format_journal_line(event)
+        end
+      end
+      puts
+    end
     puts '--- Next action ---'
     result = build_advance_result(state)
     render_advance(result, 'prompt')
     exit(2) if strict && result['action'] == 'stop'
   end
 
+  def format_journal_line(event)
+    ts = event['ts'] || '-'
+    kind = event['kind'] || '-'
+    extras = event.reject { |k, _| %w[ts kind session_id].include?(k) }
+    suffix = extras.map { |k, v| "#{k}=#{v}" }.join(' ')
+    suffix.empty? ? "#{ts} #{kind}" : "#{ts} #{kind} #{suffix}"
+  end
+
   # Autonomous continuation state machine. Unlike `next --strict`, placeholder
   # contracts are not treated as a blocker here: they become an internal
   # Golden-Loop action (`promote_placeholder`) so agents keep moving without
   # asking the user for phase-boundary confirmation.
+  #
+  # When the action resolves to `implement`, advance also auto-starts the
+  # phase by writing state['current_phase'] and appending a phase_start
+  # event to the journal. This makes "phase has begun" externally visible
+  # without requiring agents to call a separate `start` command.
   def advance(format:, strict:)
     ensure_git_repo!
-    result = build_advance_result(load_state)
+    state = load_state
+    result = build_advance_result(state)
+
+    if result['action'] == 'implement' && result.dig('phase', 'phase_id')
+      target = fetch_phase(result['phase']['phase_id'])
+      start_phase_if_needed!(state, target)
+      result = enrich_advance_with_current_phase(result, state)
+    end
+
     render_advance(result, format)
     exit(2) if strict && result['action'] == 'stop'
+  end
+
+  def enrich_advance_with_current_phase(result, state)
+    current = state['current_phase']
+    return result unless current.is_a?(Hash)
+
+    result.merge(
+      'current_phase' => {
+        'phase_id' => current['phase_id'],
+        'started_at' => current['started_at'],
+        'attempts' => current['attempts'],
+        'stage' => current['stage'],
+        'session_id' => current['session_id']
+      }
+    )
+  end
+
+  # Append an agent-authored note to the current phase's journal. Used as
+  # an externalized scratchpad during long phases so mid-phase compression
+  # / new sessions can pick up reasoning, tried-and-rejected alternatives,
+  # and open questions without losing them to the context window.
+  def note(text)
+    ensure_git_repo!
+    if text.nil? || text.to_s.strip.empty?
+      warn '[planctl] note text must not be empty.'
+      exit 2
+    end
+
+    state = load_state
+    current = state['current_phase']
+    if !current.is_a?(Hash) || blank?(current['phase_id'].to_s)
+      warn '[planctl] no current phase in flight; nothing to note.'
+      warn '[planctl] Run `ruby scripts/planctl advance --strict` first so the journal knows which phase to attach the note to.'
+      exit 2
+    end
+
+    journal_append(current['phase_id'], 'agent_note', 'text' => text.to_s)
+    puts "[planctl] Note appended to journal for #{current['phase_id']}."
+  end
+
+  # Replay an interrupted `complete` flow. When `complete` crashes after
+  # write_state but before / during the git commit+push, state.yaml is
+  # ahead of the git history. repair-complete inspects current_phase.stage
+  # and runs the missing git steps idempotently.
+  def repair_complete
+    ensure_git_repo!
+    state = load_state
+    current = state['current_phase']
+
+    if !current.is_a?(Hash) || blank?(current['phase_id'].to_s)
+      puts '[planctl] No completion in flight; nothing to repair.'
+      return
+    end
+
+    phase_id = current['phase_id']
+    stage = current['stage'].to_s
+    completed = Array(state['completed_phases']).include?(phase_id)
+
+    if stage == PHASE_STAGE_IMPLEMENTING
+      puts "[planctl] current phase #{phase_id} is still in stage #{PHASE_STAGE_IMPLEMENTING.inspect};"
+      puts '[planctl] no half-finished completion to replay. Run `complete` when the phase is actually done.'
+      return
+    end
+
+    unless [PHASE_STAGE_STATE_WRITTEN, PHASE_STAGE_COMMITTED].include?(stage)
+      warn "[planctl] unknown current_phase.stage #{stage.inspect}; refusing to repair."
+      exit 2
+    end
+
+    unless completed
+      warn "[planctl] inconsistency: current_phase.stage=#{stage} but #{phase_id} is not in completed_phases."
+      warn '[planctl] Inspect plan/state.yaml manually; do not run repair-complete blindly.'
+      exit 2
+    end
+
+    phase = fetch_phase(phase_id)
+    log_entry = Array(state['completion_log']).reverse.find { |e| e.is_a?(Hash) && e['phase_id'] == phase_id }
+    summary = log_entry && log_entry['summary'] || 'Repaired by planctl repair-complete after an interrupted completion.'
+    next_focus = log_entry && log_entry['next_focus']
+
+    journal_append(phase_id, 'repair_start', 'previous_stage' => stage)
+
+    if stage == PHASE_STAGE_STATE_WRITTEN
+      result = commit_and_push_milestone!(phase_id, phase['title'], summary, next_focus)
+      if result == :committed
+        state['current_phase']['stage'] = PHASE_STAGE_COMMITTED
+        state['updated_at'] = Time.now.utc.iso8601
+        write_state(state)
+        journal_append(phase_id, 'complete_stage', 'stage' => PHASE_STAGE_COMMITTED)
+      elsif result == :no_commit
+        # Nothing to commit (working tree already clean): treat as already
+        # committed for repair purposes — the milestone may have been
+        # committed in a prior partial run.
+        journal_append(phase_id, 'repair_no_commit')
+      else
+        warn "[planctl] repair-complete: commit step returned #{result}; leaving stage at #{stage}."
+        exit 2
+      end
+    elsif stage == PHASE_STAGE_COMMITTED && !env_truthy?(SKIP_PUSH_ENV)
+      push_milestone!(phase_id)
+    end
+
+    clear_current_phase!(state)
+    journal_append(phase_id, 'complete_done', 'via' => 'repair_complete')
+    puts "[planctl] Repair complete for #{phase_id}."
   end
 
   # Repository integrity checker. Returns exit 0 when healthy, 2 when
@@ -661,40 +867,49 @@ class PlanCtl
   # Escape hatches (unattended-friendly):
   #   PHASE_CONTRACT_SKIP_COMMIT=1  -> skip commit and push entirely
   #   PHASE_CONTRACT_SKIP_PUSH=1    -> commit locally, skip push
+  # Returns a symbol describing what happened so callers (`complete`) can
+  # advance the current_phase.stage marker accordingly:
+  #   :git_disabled    git opt-out or no work tree (no stage change)
+  #   :skipped         SKIP_COMMIT_ENV set
+  #   :no_commit       nothing staged (already clean) or git add failed
+  #   :commit_failed   git commit step failed
+  #   :committed       a real milestone commit was created (push may or may
+  #                    not have succeeded; push is advisory)
   def commit_and_push_milestone!(phase_id, title, summary, next_focus)
-    return if git_opt_out?
-    return unless git_work_tree?
+    return :git_disabled if git_opt_out?
+    return :git_disabled unless git_work_tree?
 
     if env_truthy?(SKIP_COMMIT_ENV)
       puts "[planctl] #{SKIP_COMMIT_ENV} is set; skipping auto-commit and auto-push."
-      return
+      return :skipped
     end
 
     unless run_git('add', '-A')
       warn '[planctl] git add -A failed; milestone not committed. Resolve and commit manually.'
-      return
+      return :no_commit
     end
 
     # `git diff --cached --quiet` exits 0 when nothing is staged.
     if run_git('diff', '--cached', '--quiet')
       puts "[planctl] Nothing to commit for #{phase_id}; working tree already clean."
-      return
+      return :no_commit
     end
 
     message = build_commit_message(phase_id, title, summary, next_focus)
     unless run_git_with_stdin(message, 'commit', '-F', '-')
       warn "[planctl] git commit failed for #{phase_id}; state is marked complete but no milestone commit was recorded."
       warn '[planctl] Resolve the commit manually (hooks, signing, identity) and commit the pending changes.'
-      return
+      return :commit_failed
     end
     puts "[planctl] Committed milestone: #{phase_id}"
 
     if env_truthy?(SKIP_PUSH_ENV)
       puts "[planctl] #{SKIP_PUSH_ENV} is set; skipping push. Milestone is stored locally only."
-      return
+      return :committed
     end
 
     push_milestone!(phase_id)
+    :committed
   end
 
   def push_milestone!(phase_id)
@@ -860,11 +1075,12 @@ class PlanCtl
     end
   end
 
-  def run_contract_lint_check(phase)
+  def run_contract_lint_check(phase, journal_phase_id: nil)
     started_at = monotonic_now
+    journal_append(journal_phase_id, 'check_start', 'check_id' => 'contract-lint', 'required' => true)
     lint = lint_phase_contract(phase, targeted: true, current_phase_id: phase['id'])
     output = contract_lint_output(lint)
-    {
+    result = {
       'id' => 'contract-lint',
       'command' => "ruby scripts/planctl lint-contracts --phase #{phase['id']}",
       'exit_code' => lint['problems'].empty? ? 0 : 2,
@@ -873,12 +1089,22 @@ class PlanCtl
       'output_tail' => summarize_check_output(output),
       'required' => true
     }
+    journal_append(
+      journal_phase_id,
+      'check_done',
+      'check_id' => 'contract-lint',
+      'status' => result['status'],
+      'exit_code' => result['exit_code'],
+      'duration_seconds' => result['duration_seconds'],
+      'required' => true
+    )
+    result
   end
 
-  def run_declared_checks(phase, kind:)
+  def run_declared_checks(phase, kind:, journal_phase_id: nil)
     definitions = declared_checks_for(phase, kind)
     definitions.map do |definition|
-      run_declared_check(definition, required: kind == 'required')
+      run_declared_check(definition, required: kind == 'required', journal_phase_id: journal_phase_id)
     end
   end
 
@@ -886,14 +1112,14 @@ class PlanCtl
     Array(phase.dig('checks', kind))
   end
 
-  def run_declared_check(definition, required:)
+  def run_declared_check(definition, required:, journal_phase_id: nil)
     started_at = monotonic_now
     id = definition['id'].to_s.strip
     command = definition['command'].to_s.strip
     timeout_seconds = normalize_timeout(definition['timeout_seconds'])
 
     if id.empty? || command.empty?
-      return {
+      result = {
         'id' => id.empty? ? '(missing-id)' : id,
         'command' => command,
         'exit_code' => 2,
@@ -902,10 +1128,22 @@ class PlanCtl
         'output_tail' => summarize_check_output('check definition is missing id or command.'),
         'required' => required
       }
+      journal_append(
+        journal_phase_id,
+        'check_done',
+        'check_id' => result['id'],
+        'status' => 'failed',
+        'exit_code' => 2,
+        'duration_seconds' => result['duration_seconds'],
+        'required' => required,
+        'reason' => 'definition_invalid'
+      )
+      return result
     end
 
+    journal_append(journal_phase_id, 'check_start', 'check_id' => id, 'command' => command, 'required' => required)
     execution = run_shell_check(command, timeout_seconds: timeout_seconds)
-    {
+    result = {
       'id' => id,
       'command' => command,
       'exit_code' => execution['exit_code'],
@@ -914,6 +1152,26 @@ class PlanCtl
       'output_tail' => summarize_check_output(execution['output']),
       'required' => required
     }
+    journal_append(
+      journal_phase_id,
+      'check_done',
+      'check_id' => id,
+      'status' => result['status'],
+      'exit_code' => result['exit_code'],
+      'duration_seconds' => result['duration_seconds'],
+      'required' => required
+    )
+    result
+  end
+
+  def compute_elapsed_seconds(started_at, finished_at)
+    return nil if blank?(started_at.to_s) || blank?(finished_at.to_s)
+
+    start = parse_iso8601(started_at)
+    finish = parse_iso8601(finished_at)
+    return nil unless start && finish
+
+    (finish - start).to_i
   end
 
   def run_shell_check(command, timeout_seconds:)
@@ -1659,6 +1917,134 @@ class PlanCtl
     initial_state
   end
 
+  # ---- Phase journal (Session-layer append-only event log) --------------
+  #
+  # Each phase gets a JSONL file at plan/journal/phase-<id>.jsonl into which
+  # planctl appends events as the phase progresses: phase_start, agent_note,
+  # check_start, check_done, gate_failed, complete_stage, complete_done.
+  #
+  # The journal is the spine that connects three otherwise-separate concerns:
+  #   1. Session layer (scratchpad for mid-phase compression recovery).
+  #   2. In-flight ledger (lets repair-complete know where a crash stopped).
+  #   3. Telemetry (attempts, durations, gate outcomes per phase).
+  #
+  # Append-only + line-oriented means a crash mid-write at worst truncates
+  # the trailing line; the rest stays parseable. No atomic_write needed.
+
+  def journal_path(phase_id)
+    @repo_root.join(JOURNAL_DIR, "#{phase_id}.jsonl")
+  end
+
+  def journal_append(phase_id, kind, payload = {})
+    return if phase_id.nil? || phase_id.to_s.empty?
+
+    path = journal_path(phase_id)
+    path.dirname.mkpath
+    event = {
+      'ts' => Time.now.utc.iso8601,
+      'kind' => kind,
+      'session_id' => current_session_id
+    }
+    payload.each { |k, v| event[k.to_s] = v unless v.nil? }
+
+    File.open(path, 'a') do |f|
+      f.puts JSON.generate(event)
+      f.flush
+    end
+  end
+
+  def tail_journal(phase_id, limit = JOURNAL_TAIL_DEFAULT)
+    path = journal_path(phase_id)
+    return [] unless path.file?
+
+    lines = read_text_file(path).lines.last(limit)
+    lines.each_with_object([]) do |line, result|
+      next if line.strip.empty?
+
+      begin
+        result << JSON.parse(line)
+      rescue JSON::ParserError
+        # Skip a malformed line (likely a torn write); keep tailing the rest.
+      end
+    end
+  end
+
+  def current_session_id
+    @session_id ||= begin
+      env_value = ENV[SESSION_ID_ENV].to_s.strip
+      env_value.empty? ? SecureRandom.hex(4) : env_value
+    end
+  end
+
+  # ---- current_phase helpers --------------------------------------------
+  #
+  # state['current_phase'] is a hash carrying phase_id, started_at,
+  # session_id, attempts, stage. It is the externalized "phase is in flight"
+  # signal. A clean phase boundary is signalled by removing the key entirely
+  # (Hash#delete keeps state.yaml output minimal and round-trip stable).
+
+  def start_phase_if_needed!(state, phase)
+    current = state['current_phase']
+    if current.is_a?(Hash) &&
+       current['phase_id'] == phase['id'] &&
+       current['stage'] != PHASE_STAGE_COMMITTED
+      return state
+    end
+
+    timestamp = Time.now.utc.iso8601
+    state['current_phase'] = {
+      'phase_id' => phase['id'],
+      'started_at' => timestamp,
+      'session_id' => current_session_id,
+      'attempts' => 0,
+      'stage' => PHASE_STAGE_IMPLEMENTING
+    }
+    state['updated_at'] = timestamp
+    write_state(state)
+    journal_append(phase['id'], 'phase_start', 'attempt' => 1)
+    state
+  end
+
+  def set_current_phase_stage!(state, stage)
+    return state unless state.is_a?(Hash) && state['current_phase'].is_a?(Hash)
+
+    state['current_phase']['stage'] = stage
+    state['updated_at'] = Time.now.utc.iso8601
+    write_state(state)
+    state
+  end
+
+  def bump_current_phase_attempt!(state, phase_id)
+    timestamp = Time.now.utc.iso8601
+    current = state['current_phase']
+    if current.is_a?(Hash) && current['phase_id'] == phase_id
+      current['attempts'] = current['attempts'].to_i + 1
+    else
+      state['current_phase'] = {
+        'phase_id' => phase_id,
+        'started_at' => timestamp,
+        'session_id' => current_session_id,
+        'attempts' => 1,
+        'stage' => PHASE_STAGE_IMPLEMENTING
+      }
+      journal_append(phase_id, 'phase_start', 'attempt' => 1)
+    end
+    state['updated_at'] = timestamp
+    write_state(state)
+    state['current_phase']['attempts']
+  end
+
+  def clear_current_phase!(state)
+    return state unless state.is_a?(Hash)
+
+    if state.key?('current_phase')
+      state.delete('current_phase')
+      state['updated_at'] = Time.now.utc.iso8601
+      write_state(state)
+    end
+    state
+  end
+
   def default_state
     {
       'version' => STATE_SCHEMA_VERSION,
@@ -2155,7 +2541,9 @@ def usage
       ruby scripts/planctl complete <phase-id> [--summary TEXT] [--next-focus TEXT] [--continue]
       ruby scripts/planctl revert <phase-id> [--mode revert|reset] [--summary TEXT]
       ruby scripts/planctl handoff [--format prompt|json] [--write]
-      ruby scripts/planctl resume [--strict]
+      ruby scripts/planctl resume [--strict] [--brief]
+      ruby scripts/planctl note <text>
+      ruby scripts/planctl repair-complete
       ruby scripts/planctl doctor
       ruby scripts/planctl finalize [--format text|json]
   USAGE
@@ -2276,17 +2664,35 @@ when 'handoff'
   end
   planctl.handoff(format: options[:format], write: options[:write])
 when 'resume'
-  options = { strict: false }
+  options = { strict: false, brief: false }
   parser = OptionParser.new do |opts|
     opts.banner = usage
     opts.on('--strict', 'Exit non-zero if next phase is not ready') { options[:strict] = true }
+    opts.on('--brief', 'Print only phase id + ACTION + required_context (compression-tight)') { options[:brief] = true }
   end
   parser.parse!(ARGV)
   if ARGV.any?
     warn parser.to_s
     exit 1
   end
-  planctl.resume(strict: options[:strict])
+  planctl.resume(strict: options[:strict], brief: options[:brief])
+when 'note'
+  parser = OptionParser.new { |opts| opts.banner = usage }
+  parser.parse!(ARGV)
+  text = ARGV.shift
+  if text.nil? || ARGV.any?
+    warn parser.to_s
+    exit 1
+  end
+  planctl.note(text)
+when 'repair-complete'
+  parser = OptionParser.new { |opts| opts.banner = usage }
+  parser.parse!(ARGV)
+  if ARGV.any?
+    warn parser.to_s
+    exit 1
+  end
+  planctl.repair_complete
 when 'doctor'
   parser = OptionParser.new { |opts| opts.banner = usage }
   parser.parse!(ARGV)

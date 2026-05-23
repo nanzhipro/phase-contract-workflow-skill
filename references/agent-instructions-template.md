@@ -61,6 +61,8 @@
    - 当前 phase 的 `plan/phases/*.md`
    - 当前 phase 的 `plan/execution/*.md`
    - `plan/handoff.md`
+7. 实施期间做出关键决定、试错记录或拉一份待办时，用 `ruby scripts/planctl note "<text>"` 把它写入当前 phase 的 journal（`plan/journal/<phase-id>.jsonl`，append-only），便于压缩在 phase 中段发生或换会话续跑时复原推理链。journal 由 `planctl` 自动维护 phase_start / check_done / complete_stage 等事件，agent 不得手工编辑该文件。
+8. 开会话或上下文压缩后续跑时，若 `state.yaml` 中存在 `current_phase`，说明上一会话正在 phase 实施中段。先跑 `ruby scripts/planctl resume --strict` 读取 journal tail（最近 30 条事件）了解中断点，再继续实施；若 context 余量紧张可用 `resume --strict --brief` 拿到最小化恢复信息。
 
 ## 六、实施边界规约
 
@@ -105,6 +107,7 @@
 10. 允许设置 `PHASE_CONTRACT_SKIP_PUSH=1`（仅本地 commit）或 `PHASE_CONTRACT_SKIP_COMMIT=1`（跳过整条 git 收尾）仅用于离线 / 排障等特殊场景，默认不要使用；若仓库天然没有 remote，也不要把它当成阻塞条件，应继续执行并在对用户的汇报里明确说明当前只落本地里程碑。若 AI 基于上述推理更新了 `.gitignore`，应将其视为正常基础设施变更，而不是越界编辑。
 11. 若 `complete` 的 commit 或 push 失败，`state.yaml` 仍会保持已完成状态（不回滚）；应当向用户报告 warning 原文并提示手动处置（鉴权、保护分支、pre-commit hook 等），而不是尝试手动 `git reset` 或伪造提交。
 12. 回退某个已完成 phase 时必须走 `ruby scripts/planctl revert <phase-id>`，不得手工 `git revert` / `git reset` 也不得手工改 `state.yaml`；script 会负责定位里程碑 commit、保护下游依赖、重写 state/handoff 并提交 ledger。
+13. 如果 `complete` 中途因进程崩溃、网络中断或 commit hook 失败而被打断，下一次开会话先跑 `ruby scripts/planctl repair-complete`，让脚本根据 `current_phase.stage`（`state_written` / `committed`）幂等地重放剩余的 commit / push 步骤；不得手工 `git commit`、手工 `git push` 或编辑 `state.yaml` 来"修齐"。repair-complete 在没有进行中完成时是 no-op，可以安全地放在恢复流程开头。
 
 ## 九、压缩恢复规约
 

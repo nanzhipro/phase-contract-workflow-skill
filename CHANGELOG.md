@@ -4,6 +4,45 @@
 
 ### Added
 
+- **Phase Journal (Session-layer event log)** — every phase now gets an
+  append-only JSONL file at `plan/journal/<phase-id>.jsonl`. `planctl`
+  emits structured events automatically: `phase_start`, `complete_start`,
+  `check_start`, `check_done`, `gate_failed`, `complete_stage`
+  (`state_written` / `committed`), `complete_done`, plus
+  `agent_note` entries written via `planctl note <text>`. Append-only +
+  line-oriented format means a crash mid-write at worst truncates the
+  trailing line — the rest stays parseable. This is the spine for crash
+  recovery, mid-phase compression survival, and per-phase telemetry.
+- **`plan/state.yaml.current_phase` field** — externalized "phase is in
+  flight" signal. Populated by `advance` when it returns
+  `ACTION: implement` (auto-start: no separate command needed), updated
+  through stages `implementing` / `state_written` / `committed`, and
+  cleared on successful `complete`. Carries `phase_id`, `started_at`,
+  `session_id`, `attempts`, and the current `stage`.
+- **`completion_log[*]` telemetry** — successful `complete` now also
+  records `started_at`, `elapsed_seconds`, `attempts`, and `session_id`
+  alongside the existing summary / next_focus / checks. Foundation for
+  budget/health/circuit-breaker work in later batches.
+- **`planctl note <text>`** — agent-authored scratchpad. Appends an
+  `agent_note` event to the current phase's journal so decisions,
+  tried-and-rejected alternatives, and open questions survive context
+  compression and new-session restarts. Refuses with exit 2 when no
+  phase is in flight.
+- **`planctl repair-complete`** — idempotent recovery for `complete`
+  flows interrupted between the state-write and the git commit/push.
+  Inspects `current_phase.stage` and replays the missing git steps. A
+  no-op when no completion is in flight, safe to run at the start of
+  every recovery session.
+- **`planctl resume --brief`** — minimal compression-tight resume output
+  (project name + next ACTION + required_context only), for when context
+  budget is tight right after a compression event. The default `resume`
+  now also prints `Current phase journal (last 30 events)` when a phase
+  is in flight, restoring the in-phase reasoning chain without re-reading
+  every contract file.
+- Tests in `tests/planctl_autonomous_test.rb` covering journal event
+  emission, current_phase auto-start on `advance`, `note` happy + refuse
+  paths, `repair-complete` no-op + replay paths, and `resume --brief`.
+
 - `planctl lint-contracts [--phase <phase-id> | --all]` — machine lint for
   phase contracts. It validates the effective three-file context law
   (`common + phase + execution`), required marker sections
