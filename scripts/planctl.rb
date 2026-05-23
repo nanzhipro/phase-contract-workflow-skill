@@ -15,11 +15,12 @@ class PlanCtl
   SKIP_COMMIT_ENV = 'PHASE_CONTRACT_SKIP_COMMIT'
   ENFORCE_PATHS_ENV = 'PHASE_CONTRACT_ENFORCE_PATHS'
   GIT_GUARD_EXIT_CODE = 3
-  ALWAYS_ALLOWED_PATHS = %w[plan/state.yaml plan/handoff.md plan/journal/*.jsonl .gitignore].freeze
+  ALWAYS_ALLOWED_PATHS = %w[plan/state.yaml plan/handoff.md plan/journal/*.jsonl plan/pause.flag .gitignore].freeze
   STATE_SCHEMA_VERSION = 1
   JOURNAL_DIR = 'plan/journal'
   JOURNAL_TAIL_DEFAULT = 30
   SESSION_ID_ENV = 'PHASE_CONTRACT_SESSION_ID'
+  PAUSE_FLAG_PATH = 'plan/pause.flag'
   # Phase in-progress stages tracked in state['current_phase']['stage'].
   # `implementing` covers gate-failure retries; transitions to `state_written`
   # and `committed` happen inside a successful `complete` and let
@@ -242,7 +243,8 @@ class PlanCtl
       'version' => state['version'] || STATE_SCHEMA_VERSION,
       'completed_phases' => ordered,
       'completion_log' => completion_log,
-      'updated_at' => timestamp
+      'updated_at' => timestamp,
+      'phases_since_checkpoint' => state['phases_since_checkpoint'].to_i + 1
     )
     # current_phase carries forward into write_state so a crash between the
     # state write and the git commit leaves a recoverable breadcrumb for
@@ -554,6 +556,74 @@ class PlanCtl
 
     journal_append(current['phase_id'], 'agent_note', 'text' => text.to_s)
     puts "[planctl] Note appended to journal for #{current['phase_id']}."
+  end
+
+  # Human-in-the-loop pause. Writes plan/pause.flag with an optional
+  # reason; advance treats this as ACTION: stop / human_pause on its next
+  # invocation. Stopping AT the phase boundary (instead of mid-complete)
+  # avoids the half-finished-completion problem that Ctrl-C would create.
+  def pause(reason:)
+    ensure_git_repo!
+    path = @repo_root.join(PAUSE_FLAG_PATH)
+    path.dirname.mkpath
+    body = reason.nil? || reason.to_s.strip.empty? ? '' : reason.to_s.strip + "\n"
+    atomic_write(path, body)
+    puts "[planctl] Paused. plan/pause.flag written#{reason ? " (reason: #{reason.to_s.strip})" : ''}."
+    puts '[planctl] Resume with `ruby scripts/planctl unpause`.'
+  end
+
+  def unpause
+    ensure_git_repo!
+    path = @repo_root.join(PAUSE_FLAG_PATH)
+    if path.file?
+      path.delete
+      puts '[planctl] Unpaused. plan/pause.flag removed.'
+    else
+      puts '[planctl] Not paused; nothing to do.'
+    end
+  end
+
+  # Acknowledge a checkpoint and reset phases_since_checkpoint. After this
+  # the next `advance` falls through to the normal implement / finalize
+  # flow until the next checkpoint_every threshold is hit.
+  def ack_checkpoint
+    ensure_git_repo!
+    state = load_state
+    current = state['phases_since_checkpoint'].to_i
+    if current.zero?
+      puts '[planctl] phases_since_checkpoint is already 0; nothing to acknowledge.'
+      return
+    end
+
+    state['phases_since_checkpoint'] = 0
+    state['updated_at'] = Time.now.utc.iso8601
+    write_state(state)
+
+    if state['current_phase'].is_a?(Hash)
+      journal_append(state['current_phase']['phase_id'], 'checkpoint_ack', 'previous_count' => current)
+    end
+    puts "[planctl] Checkpoint acknowledged; phases_since_checkpoint reset from #{current} to 0."
+  end
+
+  # Clear retry attempts for a phase. Used after the human investigates an
+  # attempts_exhausted stop and intends to let the agent try again.
+  def reset_attempts(phase_id)
+    ensure_git_repo!
+    fetch_phase(phase_id) # validate phase exists; exits 1 if not
+    state = load_state
+    current = state['current_phase']
+
+    if !current.is_a?(Hash) || current['phase_id'] != phase_id
+      puts "[planctl] No in-flight phase matches #{phase_id}; nothing to reset."
+      return
+    end
+
+    previous = current['attempts'].to_i
+    current['attempts'] = 0
+    state['updated_at'] = Time.now.utc.iso8601
+    write_state(state)
+    journal_append(phase_id, 'attempts_reset', 'previous_attempts' => previous)
+    puts "[planctl] attempts reset for #{phase_id} (was #{previous}, now 0)."
   end
 
   # Replay an interrupted `complete` flow. When `complete` crashes after
@@ -1470,6 +1540,31 @@ class PlanCtl
     phase = first_remaining_phase(completed)
     continuation = continuation_policy
 
+    # Human pause: highest-priority "stop" outside real blockers. Lets a
+    # human pause an autonomous run at the next phase boundary without
+    # having to Ctrl-C mid-complete (which would leave current_phase in
+    # flight and force a repair-complete).
+    pause = pause_flag_payload
+    if pause
+      return {
+        'action' => 'stop',
+        'stop_reason' => 'human_pause',
+        'phase' => phase ? {
+          'phase_id' => phase['id'],
+          'title' => phase['title'],
+          'plan_file' => phase['plan_file'],
+          'execution_file' => phase['execution_file']
+        } : nil,
+        'required_context' => [],
+        'missing_dependencies' => [],
+        'missing_context_files' => [],
+        'placeholder_contract_files' => [],
+        'continuation' => continuation,
+        'pause_reason' => pause,
+        'next_command' => 'ruby scripts/planctl unpause'
+      }
+    end
+
     unless phase
       return {
         'action' => 'finalize',
@@ -1479,6 +1574,58 @@ class PlanCtl
         'continuation' => continuation,
         'finalize_command' => 'ruby scripts/planctl finalize',
         'message' => 'All phases are completed. Run finalize, then stop for human release/archive decisions.'
+      }
+    end
+
+    # Checkpoint: every N completed phases, advance returns a sync point so
+    # the human gets a chance to review aggregate progress. Not a blocker —
+    # exit 0, with explicit ack-checkpoint command to resume.
+    every = checkpoint_every
+    if every.positive? && state['phases_since_checkpoint'].to_i >= every
+      return {
+        'action' => 'checkpoint',
+        'stop_reason' => 'checkpoint_reached',
+        'phase' => {
+          'phase_id' => phase['id'],
+          'title' => phase['title'],
+          'plan_file' => phase['plan_file'],
+          'execution_file' => phase['execution_file']
+        },
+        'required_context' => [],
+        'missing_dependencies' => [],
+        'missing_context_files' => [],
+        'placeholder_contract_files' => [],
+        'continuation' => continuation,
+        'checkpoint_every' => every,
+        'phases_since_checkpoint' => state['phases_since_checkpoint'].to_i,
+        'recent_completions' => recent_completion_summaries(state, every),
+        'next_command' => 'ruby scripts/planctl ack-checkpoint'
+      }
+    end
+
+    # Attempts exhausted: same phase has failed `complete` too many times.
+    # A real stop — exit 2 in --strict. Agent should escalate to human.
+    max_attempts = phase['max_attempts'].to_i
+    if max_attempts.positive? &&
+       state.dig('current_phase', 'phase_id') == phase['id'] &&
+       state.dig('current_phase', 'attempts').to_i >= max_attempts
+      return {
+        'action' => 'stop',
+        'stop_reason' => 'attempts_exhausted',
+        'phase' => {
+          'phase_id' => phase['id'],
+          'title' => phase['title'],
+          'plan_file' => phase['plan_file'],
+          'execution_file' => phase['execution_file']
+        },
+        'required_context' => [],
+        'missing_dependencies' => [],
+        'missing_context_files' => [],
+        'placeholder_contract_files' => [],
+        'continuation' => continuation,
+        'attempts' => state.dig('current_phase', 'attempts').to_i,
+        'max_attempts' => max_attempts,
+        'next_command' => "ruby scripts/planctl reset-attempts #{phase['id']}"
       }
     end
 
@@ -1513,6 +1660,32 @@ class PlanCtl
       'continuation' => continuation,
       'next_command' => 'ruby scripts/planctl advance --strict'
     }
+  end
+
+  def pause_flag_payload
+    path = @repo_root.join(PAUSE_FLAG_PATH)
+    return nil unless path.file?
+
+    content = read_text_file(path).strip
+    content.empty? ? '(no reason recorded)' : content
+  end
+
+  def checkpoint_every
+    @manifest.dig('execution_rule', 'continuation', 'checkpoint_every').to_i
+  end
+
+  def recent_completion_summaries(state, limit)
+    Array(state['completion_log']).last(limit).map do |entry|
+      next unless entry.is_a?(Hash)
+
+      {
+        'phase_id' => entry['phase_id'],
+        'completed_at' => entry['completed_at'],
+        'summary' => entry['summary'],
+        'elapsed_seconds' => entry['elapsed_seconds'],
+        'attempts' => entry['attempts']
+      }
+    end.compact
   end
 
   def build_status_result(state)
@@ -1703,12 +1876,41 @@ class PlanCtl
       when 'finalize'
         puts result['message']
         puts "NEXT_COMMAND: #{result['finalize_command']}"
-      when 'stop'
-        puts 'Blockers:'
-        puts "- missing dependencies: #{format_list(result['missing_dependencies'])}"
-        puts "- missing context files: #{format_list(result['missing_context_files'])}"
+      when 'checkpoint'
+        puts 'Reached a planned human-in-the-loop checkpoint.'
+        puts "Phases since last checkpoint: #{result['phases_since_checkpoint']} (threshold=#{result['checkpoint_every']})."
         puts
-        puts 'Stop and report this blocker before editing files.'
+        unless Array(result['recent_completions']).empty?
+          puts 'Recent completions:'
+          result['recent_completions'].each do |entry|
+            detail = entry['summary'] || '(no summary recorded)'
+            extras = []
+            extras << "attempts=#{entry['attempts']}" if entry['attempts']
+            extras << "elapsed_seconds=#{entry['elapsed_seconds']}" if entry['elapsed_seconds']
+            suffix = extras.empty? ? '' : " [#{extras.join(' ')}]"
+            puts "- #{entry['phase_id']}#{suffix}: #{detail}"
+          end
+          puts
+        end
+        puts 'Next internal action: report this checkpoint to the human, wait for explicit go-ahead.'
+        puts "Resume with: #{result['next_command']}"
+      when 'stop'
+        case result['stop_reason']
+        when 'human_pause'
+          puts 'A human has paused this workflow.'
+          puts "Reason: #{result['pause_reason']}" if result['pause_reason']
+          puts "Resume with: #{result['next_command']}"
+        when 'attempts_exhausted'
+          puts "Current phase has exhausted its retry budget (attempts=#{result['attempts']}, max=#{result['max_attempts']})."
+          puts 'Next internal action: escalate to a human. Do not silently retry.'
+          puts "To reset and try again: #{result['next_command']}"
+        else
+          puts 'Blockers:'
+          puts "- missing dependencies: #{format_list(result['missing_dependencies'])}"
+          puts "- missing context files: #{format_list(result['missing_context_files'])}"
+          puts
+          puts 'Stop and report this blocker before editing files.'
+        end
       else
         puts 'Unknown action. Stop and inspect planctl output.'
       end
@@ -2544,6 +2746,10 @@ def usage
       ruby scripts/planctl resume [--strict] [--brief]
       ruby scripts/planctl note <text>
       ruby scripts/planctl repair-complete
+      ruby scripts/planctl pause [--reason TEXT]
+      ruby scripts/planctl unpause
+      ruby scripts/planctl ack-checkpoint
+      ruby scripts/planctl reset-attempts <phase-id>
       ruby scripts/planctl doctor
       ruby scripts/planctl finalize [--format text|json]
   USAGE
@@ -2693,6 +2899,43 @@ when 'repair-complete'
     exit 1
   end
   planctl.repair_complete
+when 'pause'
+  options = { reason: nil }
+  parser = OptionParser.new do |opts|
+    opts.banner = usage
+    opts.on('--reason TEXT', 'Optional human-readable reason recorded in plan/pause.flag') { |v| options[:reason] = v }
+  end
+  parser.parse!(ARGV)
+  if ARGV.any?
+    warn parser.to_s
+    exit 1
+  end
+  planctl.pause(reason: options[:reason])
+when 'unpause'
+  parser = OptionParser.new { |opts| opts.banner = usage }
+  parser.parse!(ARGV)
+  if ARGV.any?
+    warn parser.to_s
+    exit 1
+  end
+  planctl.unpause
+when 'ack-checkpoint'
+  parser = OptionParser.new { |opts| opts.banner = usage }
+  parser.parse!(ARGV)
+  if ARGV.any?
+    warn parser.to_s
+    exit 1
+  end
+  planctl.ack_checkpoint
+when 'reset-attempts'
+  parser = OptionParser.new { |opts| opts.banner = usage }
+  parser.parse!(ARGV)
+  phase_id = ARGV.shift
+  if phase_id.nil? || ARGV.any?
+    warn parser.to_s
+    exit 1
+  end
+  planctl.reset_attempts(phase_id)
 when 'doctor'
   parser = OptionParser.new { |opts| opts.banner = usage }
   parser.parse!(ARGV)

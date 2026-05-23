@@ -355,6 +355,119 @@ class PlanctlAutonomousTest < Minitest::Test
     refute_includes out, 'Compression rules'
   end
 
+  # ---- Batch 2: pause / checkpoint / max_attempts ------------------------
+
+  def test_advance_returns_human_pause_when_flag_present
+    File.write(File.join(@repo, 'plan/pause.flag'), "investigating regression\n")
+
+    out, err, status = run_planctl('advance', '--strict')
+
+    refute status.success?
+    assert_equal 2, status.exitstatus
+    assert_includes out, 'ACTION: stop'
+    assert_includes out, 'STOP_REASON: human_pause'
+    assert_includes out, 'investigating regression'
+  end
+
+  def test_pause_then_unpause_restores_advance
+    pause_out, _err, pause_status = run_planctl('pause', '--reason', 'test pause')
+    assert pause_status.success?, pause_out
+    assert File.file?(File.join(@repo, 'plan/pause.flag'))
+
+    _out, _err, status = run_planctl('advance', '--strict')
+    refute status.success?
+
+    unpause_out, _unpause_err, unpause_status = run_planctl('unpause')
+    assert unpause_status.success?, unpause_out
+    refute File.exist?(File.join(@repo, 'plan/pause.flag'))
+
+    out, _err, status = run_planctl('advance', '--strict')
+    assert status.success?
+    assert_includes out, 'ACTION: implement'
+  end
+
+  def test_advance_returns_checkpoint_when_threshold_hit
+    manifest_path = File.join(@repo, 'plan/manifest.yaml')
+    manifest = YAML.load_file(manifest_path)
+    manifest['execution_rule']['continuation']['checkpoint_every'] = 1
+    File.write(manifest_path, YAML.dump(manifest))
+    git('add', '-A')
+    git('commit', '-m', 'set checkpoint_every=1')
+
+    out, _err, _status = run_planctl(
+      { 'PHASE_CONTRACT_SKIP_COMMIT' => '1' },
+      'complete', 'phase-0',
+      '--summary', 'Phase 0 done.',
+      '--next-focus', 'Hit checkpoint.'
+    )
+    assert_includes out, 'ACTION: checkpoint'
+    assert_includes out, 'Phases since last checkpoint'
+
+    state = YAML.load_file(File.join(@repo, 'plan/state.yaml'))
+    assert_equal 1, state['phases_since_checkpoint']
+  end
+
+  def test_ack_checkpoint_resets_counter
+    File.write(File.join(@repo, 'plan/state.yaml'), <<~YAML)
+      version: 1
+      completed_phases:
+        - phase-0
+      completion_log:
+        - phase_id: phase-0
+          completed_at: "2026-01-01T00:00:00Z"
+          summary: "Phase 0 done."
+      phases_since_checkpoint: 1
+    YAML
+    manifest_path = File.join(@repo, 'plan/manifest.yaml')
+    manifest = YAML.load_file(manifest_path)
+    manifest['execution_rule']['continuation']['checkpoint_every'] = 1
+    File.write(manifest_path, YAML.dump(manifest))
+
+    out, _err, status = run_planctl('advance', '--strict')
+    assert status.success?, out
+    assert_includes out, 'ACTION: checkpoint'
+
+    ack_out, _ack_err, ack_status = run_planctl('ack-checkpoint')
+    assert ack_status.success?, ack_out
+
+    out, _err, status = run_planctl('advance', '--strict')
+    assert status.success?, out
+    assert_includes out, 'ACTION: implement'
+  end
+
+  def test_attempts_exhausted_stops_after_threshold
+    manifest_path = File.join(@repo, 'plan/manifest.yaml')
+    manifest = YAML.load_file(manifest_path)
+    manifest['phases'][0]['max_attempts'] = 2
+    File.write(manifest_path, YAML.dump(manifest))
+
+    File.write(File.join(@repo, 'plan/state.yaml'), <<~YAML)
+      version: 1
+      completed_phases: []
+      completion_log: []
+      current_phase:
+        phase_id: phase-0
+        started_at: "2026-01-01T00:00:00Z"
+        session_id: test
+        attempts: 2
+        stage: implementing
+    YAML
+
+    out, _err, status = run_planctl('advance', '--strict')
+    refute status.success?
+    assert_equal 2, status.exitstatus
+    assert_includes out, 'ACTION: stop'
+    assert_includes out, 'STOP_REASON: attempts_exhausted'
+    assert_includes out, 'reset-attempts phase-0'
+
+    reset_out, _reset_err, reset_status = run_planctl('reset-attempts', 'phase-0')
+    assert reset_status.success?, reset_out
+
+    out, _err, status = run_planctl('advance', '--strict')
+    assert status.success?, out
+    assert_includes out, 'ACTION: implement'
+  end
+
   private
 
   def create_plan_files

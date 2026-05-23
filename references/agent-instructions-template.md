@@ -87,6 +87,9 @@
 3a. 当前项目根不是 git 工作区，且未显式设置 `PHASE_CONTRACT_ALLOW_NON_GIT=1`。此时 `scripts/planctl` 的 `advance` / `next` / `resolve` / `complete` / `handoff` 会以 exit code 3 拒绝运行，必须先让用户补齐 `git init` 基线，不得绕过。
 4. 当前工作树中存在与当前 phase 契约直接冲突、且无法在不破坏用户已有修改的前提下兼容的变更。
 5. 用户请求与当前 manifest 定义的 phase 顺序、边界或完成规则直接冲突，而规划体系本身尚未被更新。
+6. `advance --strict` 返回 `ACTION: stop` + `STOP_REASON: human_pause`：人类通过 `planctl pause` 主动暂停了工作流。必须停止实施，把暂停原因（pause.flag 中的文本）原样汇报给人类，等 `planctl unpause` 之后再续跑，不得绕过 pause.flag 自行继续。
+7. `advance --strict` 返回 `ACTION: stop` + `STOP_REASON: attempts_exhausted`：当前 phase 的 `complete` 失败次数已达 `max_attempts` 上限。必须停止重试、把失败模式与最近几次 gate 输出汇报给人类，由人类决定 `reset-attempts` 重试、回退合同、还是回退 phase；agent 不得自行 `reset-attempts` 后继续。
+8. `advance --strict` 返回 `ACTION: checkpoint`：这是预设的 human-in-the-loop 同步点（manifest 中 `checkpoint_every` 触顶），**不是** blocker，但必须停下来把累计完成的 phase 列表、健康摘要交还人类，等人类发 `planctl ack-checkpoint`（或显式继续指令）之后再续跑。
 
 ## 八、完成与推进规约
 

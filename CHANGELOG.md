@@ -43,6 +43,28 @@
   emission, current_phase auto-start on `advance`, `note` happy + refuse
   paths, `repair-complete` no-op + replay paths, and `resume --brief`.
 
+- **Human-in-the-loop pause / checkpoint / attempts brake**. Three new
+  brakes for autonomous mode, each surfaced as a distinct `advance`
+  outcome:
+  - `planctl pause [--reason "<text>"]` / `planctl unpause`: writes /
+    removes `plan/pause.flag`. While present, `advance` returns
+    `ACTION: stop` / `stop_reason: human_pause` at the next phase
+    boundary instead of mid-complete (no need to Ctrl-C the agent).
+  - `manifest.execution_rule.continuation.checkpoint_every: N`: every N
+    completed phases `advance` returns `ACTION: checkpoint` with a
+    recent-completions summary, requiring `planctl ack-checkpoint`
+    before the loop resumes. Recommended for 24h+ tasks.
+  - `manifest.phases[].max_attempts: N`: when `current_phase.attempts`
+    reaches N, `advance` returns `ACTION: stop` /
+    `stop_reason: attempts_exhausted` so the agent escalates rather
+    than silently retrying. Reset with `planctl reset-attempts
+    <phase-id>` after human review.
+- `state.yaml` gains a `phases_since_checkpoint` counter, bumped by
+  each successful `complete` and reset by `ack-checkpoint`.
+- `tests/planctl_autonomous_test.rb`: five new tests covering the
+  pause flag round trip, checkpoint threshold + ack, and attempts
+  exhausted + reset.
+
 - `planctl lint-contracts [--phase <phase-id> | --all]` — machine lint for
   phase contracts. It validates the effective three-file context law
   (`common + phase + execution`), required marker sections

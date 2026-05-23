@@ -38,6 +38,10 @@ execution_rule:
     # 再重跑 advance --strict。不要把这一步当成用户确认点。
   continuation:
     mode: autonomous
+    # checkpoint_every: <N> （0 / 缺省 = 关闭）。每完成 N 个 phase，advance 会
+    # 返回 ACTION: checkpoint，要求 agent 把累计进度汇报给人类、等 `planctl
+    # ack-checkpoint` 后继续。对 24h+ 长任务建议设 5，对短任务可保持 0。
+    checkpoint_every: 0
     stop_only_on:
       - dependency_missing
       - missing_context
@@ -45,12 +49,15 @@ execution_rule:
       - git_conflict
       - destructive_operation_required
       - all_phases_completed
+      - human_pause
+      - attempts_exhausted
     non_stop_actions:
       - phase_completed
       - next_phase_ready
       - placeholder_contract_promotion
       - optional_check_failed
       - no_remote_configured
+      - checkpoint_reached
   enforcement:
     dependency_check: true
     stop_on_missing_context: true
@@ -84,6 +91,9 @@ phases:
       - plan/phases/phase-0-<slug>.md
       - plan/execution/phase-0-<slug>.md
     depends_on: []
+    # max_attempts: <N> （可选；缺省 = 无限）。同一 phase 的 `complete` 失败
+    # 达到 N 次后，advance 会返回 ACTION: stop / attempts_exhausted，逼 agent
+    # 升级到人类。重试预算用完后用 `planctl reset-attempts <phase-id>` 重置。
     allowed_paths:
       - <路径白名单 1>
       - <路径白名单 2>

@@ -348,7 +348,17 @@ ruby scripts/planctl finalize
 
 **AI 在 phase 间越界改文件**：在 `manifest.yaml` 的 `execution_rule` 下加 `enforce_allowed_paths: true`，并给每个 phase 填 `allowed_paths:` glob 白名单（见 [references/templates.md](./references/templates.md)）。开启后 `complete` 会在写回 state 之前把 `git diff --cached` 与白名单比对，越界路径直接 abort 且**不更新 state.yaml**，phase 保持未完成。临时关掉走 `enforce_allowed_paths: false`（仅警告）或 `PHASE_CONTRACT_ENFORCE_PATHS=1` 覆盖。
 
-**新会话冷启动 / 上下文压缩后续跑**：运行 `ruby scripts/planctl resume --strict` 或 `ruby scripts/planctl advance --strict`。一次性打印项目概览、handoff 快照和下一 phase 的完整结果，等价于手动读 `manifest` + `handoff` + 跑状态机。
+**新会话冷启动 / 上下文压缩后续跑**：运行 `ruby scripts/planctl resume --strict` 或 `ruby scripts/planctl advance --strict`。一次性打印项目概览、handoff 快照和下一 phase 的完整结果，等价于手动读 `manifest` + `handoff` + 跑状态机。`state.yaml` 中存在 `current_phase` 时，`resume` 还会额外输出 `Current phase journal (last 30 events)`，恢复 phase 中段的推理链。Context 余量紧张时用 `resume --strict --brief`。
+
+**`complete` 中段被打断 → 恢复 ledger 与 git 历史**：运行 `ruby scripts/planctl repair-complete`。脚本按 `current_phase.stage` 幂等重放剩余的 commit / push。没有进行中完成时是 no-op，可放在恢复流程开头无副作用。
+
+**人类需要在 autonomous 跑动时介入**：不要 Ctrl-C（会落在 complete 中间造成状态分叉），运行 `ruby scripts/planctl pause [--reason "<...>"]` 写入 `plan/pause.flag`，下一个 phase 边界 `advance` 会返回 `ACTION: stop / human_pause`。介入完成后运行 `ruby scripts/planctl unpause`。
+
+**autonomous 跑得太远 → 强制人类同步点**：在 manifest 设 `execution_rule.continuation.checkpoint_every: N`（如 5）。每完成 N 个 phase，`advance` 返回 `ACTION: checkpoint`，agent 必须把累计进度汇报给人类，等 `ruby scripts/planctl ack-checkpoint` 后再续跑。
+
+**同一 phase 反复失败**：在 manifest phase 上设 `max_attempts: N`（如 3）。`complete` 失败次数达到 N 后，`advance` 返回 `ACTION: stop / attempts_exhausted`，agent 必须升级到人类。重试预算用完后人类用 `ruby scripts/planctl reset-attempts <phase-id>` 重置。
+
+**Phase 实施期间记录决策 / 试错**：运行 `ruby scripts/planctl note "<text>"`。把内容追加到当前 phase 的 journal（`plan/journal/<phase-id>.jsonl`），压缩或新会话续跑时由 `resume` 自动带回。
 
 **怀疑 state/agent 指令失同步**：运行 `ruby scripts/planctl doctor`。按 SHA256 对比 `.github/copilot-instructions.md`、`CLAUDE.md`、`AGENTS.md` 三份指令是否字节一致，校验 manifest 引用、state 与 handoff 的一致性；发现问题以 exit 2 退出。
 
@@ -375,6 +385,7 @@ ruby scripts/planctl finalize
 - [ ] 若目标项目已配置 `git remote`，其当前分支可推送；若暂时无 remote，已在对用户的交付说明里明确说明：后续 `complete` 将仅本地 commit、跳过 push，但**不阻塞**继续执行后续任务
 - [ ] `scripts/planctl finalize` 在 phase 尚未全部完成时以 exit 2 拒绝运行；首次成功执行会写 `finalized_at`、刷新 `handoff.md`、尝试自动 commit/push，重复执行保持只读且仍可打印仪表盘
 - [ ] 三份 agent 指令均含 §十二「整体收尾规约（Finalization）」，且禁止行为里明确不得跳过 `finalize` 自行宣告项目结束
+- [ ] 对 24h+ 长任务建议在 manifest 中设置 `execution_rule.continuation.checkpoint_every: 5`（或更小），并为关键 phase 设 `max_attempts: 3`，让 autonomous 跑飞和反复重试都被脚本而非人类察觉
 
 ## References
 

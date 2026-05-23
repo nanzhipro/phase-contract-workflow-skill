@@ -359,6 +359,9 @@ AI 在连续工作 3 小时以上的任务里会稳定出现四类失败模式�
 | 5 | 把 phase 边界误当成用户确认点 | agent 在 complete 后停住 | 用 `advance` 状态机输出内部动作 |
 | 6 | 忽视仓库级指令 | AI 直接上手，不跑 resolver | 把指令同时写进 `.github/copilot-instructions.md` / `CLAUDE.md` / `AGENTS.md` 三份 |
 | 7 | 让 AI 代写 manifest 和 common | 被 AI 的拟合带偏全局 | 这两份文档必须由人类主导 |
+| 8 | autonomous 模式跑飞 | 连续 6+ phase 默默推进，人类没机会插入修正错误假设 | manifest 设 `continuation.checkpoint_every: 5`，每 N 个 phase 强制 `ACTION: checkpoint`；agent 把累计进度汇报给人类后等 `planctl ack-checkpoint` |
+| 9 | 同一 phase 无限重试 | required check flaky 时 agent 反复试错累积时间 | manifest 在 phase 上设 `max_attempts: 3`，达到上限后 `advance` 返回 `ACTION: stop / attempts_exhausted`，逼 agent 升级到人类 |
+| 10 | Ctrl-C 打断 autonomous → 状态分叉 | mid-complete 被强杀，state.yaml 领先于 git history | 用 `planctl pause` 写 `plan/pause.flag` 在下一个 phase 边界自然停住，比 Ctrl-C 安全；已经被打断的 complete 用 `planctl repair-complete` 幂等重放 |
 
 ---
 
