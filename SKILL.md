@@ -202,6 +202,9 @@ ruby scripts/planctl lint-contracts --phase <phase-id>
 # 实施过程中：把关键决策 / 试错 / 待办追加进 phase journal,便于压缩续跑（按需）
 ruby scripts/planctl note "<决策或试错的一句话>"
 
+# 实施完成后想先确认 gate 能不能过（不写 state / handoff / journal / git，按需）
+ruby scripts/planctl complete <phase-id> --dry-run
+
 # 实施该 phase 后标记完成（自动刷新 handoff、并 git add -A / commit / push 本 phase 的里程碑）
 ruby scripts/planctl complete <phase-id> --summary "<做了什么>" --next-focus "<下一个 phase 要关注什么>" --continue
 
@@ -340,7 +343,7 @@ ruby scripts/planctl finalize
 
 **用户说"phase 文档 AI 帮我全写了吧"**：只把 phase-0（和准备立刻启动的 phase）写成正式合同；future phase 先保留占位合同。manifest 和 common 必须由用户主导，否则 AI 拟合会把全局带偏。
 
-**`advance --strict` 指向的新 phase 仍是占位合同**：这不是 blocker，也不是用户确认点。`advance` 会返回 `ACTION: promote_placeholder`；先把该 phase 的 `phases/*.md` 和 `execution/*.md` 同步升级成正式合同，再 rerun 同一条 strict 命令；返回 `ACTION: implement` 前不得开始实现。
+**`advance --strict` 指向的新 phase 仍是占位合同**：这不是 blocker，也不是用户确认点。`advance` 会返回 `ACTION: promote_placeholder`；先把该 phase 的 `phases/*.md` 和 `execution/*.md` 同步升级成正式合同，再 rerun 同一条 strict 命令；返回 `ACTION: implement` 前不得开始实现。即使占位 sentinel 已删除，只要 `planctl lint-contracts` 仍有 problems（缺 marker、Production Wiring 空、allowed_paths 空、完成判定含主观词等），`advance --strict` 也会返回 `ACTION: promote_placeholder` + `STOP_REASON: lint_failed` 并列出问题——必须修好合同再 rerun，不能靠"删 sentinel + 继续实施"绕过。
 
 **用户已有 phase 结构但没有 planctl 体系**：跳过 Step 1.3–1.4，仅生成基础设施（manifest、common、workflow、planctl、三份 agent 指令），把已有 phase 文档纳入 manifest。
 

@@ -83,6 +83,88 @@ class PlanctlQualityGatesTest < Minitest::Test
     assert_equal baseline_handoff, File.read(File.join(@repo, 'plan/handoff.md'))
   end
 
+  def test_dry_run_does_not_modify_state_or_journal
+    create_repo_fixture(
+      require_phase_checks: true,
+      required_checks: [
+        {
+          'id' => 'build',
+          'command' => "ruby -e 'puts :ok'",
+          'timeout_seconds' => 30
+        }
+      ]
+    )
+    baseline_state = File.read(File.join(@repo, 'plan/state.yaml'))
+    baseline_handoff = File.read(File.join(@repo, 'plan/handoff.md'))
+
+    out, err, status = run_planctl('complete', 'phase-0', '--dry-run')
+
+    assert status.success?, err + out
+    assert_includes out, 'DRY RUN'
+    assert_includes out, 'ok: contract-lint'
+    assert_includes out, 'ok: required check build'
+    assert_equal baseline_state, File.read(File.join(@repo, 'plan/state.yaml'))
+    assert_equal baseline_handoff, File.read(File.join(@repo, 'plan/handoff.md'))
+    refute File.exist?(File.join(@repo, 'plan/journal/phase-0.jsonl'))
+  end
+
+  def test_dry_run_returns_nonzero_when_required_check_fails
+    create_repo_fixture(
+      require_phase_checks: true,
+      required_checks: [
+        {
+          'id' => 'build',
+          'command' => "ruby -e 'warn :boom; exit 1'",
+          'timeout_seconds' => 30
+        }
+      ]
+    )
+    baseline_state = File.read(File.join(@repo, 'plan/state.yaml'))
+
+    out, err, status = run_planctl('complete', 'phase-0', '--dry-run')
+
+    refute status.success?
+    assert_equal 2, status.exitstatus
+    assert_includes err + out, 'build'
+    assert_equal baseline_state, File.read(File.join(@repo, 'plan/state.yaml'))
+    refute File.exist?(File.join(@repo, 'plan/journal/phase-0.jsonl'))
+  end
+
+  def test_advance_demotes_implement_to_promote_placeholder_when_lint_fails
+    # Build a fixture where phase-0 has no sentinel but its formal contract
+    # is missing required markers — lint will report problems and advance
+    # --strict should demote ACTION: implement to ACTION: promote_placeholder
+    # with lint_problems rendered to the agent.
+    create_repo_fixture(require_phase_checks: false, required_checks: [])
+    broken_plan = File.join(@repo, 'plan/phases/phase-0.md')
+    File.write(broken_plan, <<~MARKDOWN)
+      # Phase 0
+
+      ## 阶段定位
+
+      - 测试 lint 降级路径
+
+      ## 完成判定
+
+      - placeholder removed but markers missing
+    MARKDOWN
+
+    out, err, status = run_planctl('advance', '--strict')
+
+    # promote_placeholder remains an internal Golden Loop action (exit 0),
+    # the agent is expected to fix the lint and rerun the same strict cmd.
+    assert status.success?, "advance should succeed (exit 0) on lint demotion: #{out + err}"
+    assert_includes out, 'ACTION: promote_placeholder'
+    assert_includes out, 'STOP_REASON: lint_failed'
+    assert_includes out, 'still fail contract lint'
+    assert_includes out, 'missing marker PHASE_CONTRACT:FACT_AUDIT'
+
+    # And — crucially — no current_phase was written (advance must not auto-
+    # start a phase whose contract lint is still failing).
+    state = YAML.load_file(File.join(@repo, 'plan/state.yaml'))
+    refute state.key?('current_phase')
+  end
+
   def test_optional_check_failure_warns_but_still_completes
     create_repo_fixture(
       require_phase_checks: true,

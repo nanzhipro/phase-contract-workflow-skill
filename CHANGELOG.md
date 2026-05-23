@@ -65,6 +65,31 @@
   pause flag round trip, checkpoint threshold + ack, and attempts
   exhausted + reset.
 
+- **`advance --strict` embeds contract lint.** When the current phase
+  has no placeholder sentinel but `planctl lint-contracts` still
+  reports problems (missing markers, empty Production Wiring,
+  empty `allowed_paths`, subjective wording in completion criteria,
+  etc.), advance now demotes `ACTION: implement` to
+  `ACTION: promote_placeholder` + `STOP_REASON: lint_failed` and
+  renders the lint problems verbatim. This closes the "delete the
+  sentinel to bypass" loophole. Exit code remains 0 because
+  promotion stays an internal Golden Loop action; the agent fixes
+  the contracts and reruns the same strict command. `current_phase`
+  is not auto-started for a phase whose contract still fails lint.
+- **`planctl complete <phase-id> --dry-run`** — pre-flight preview
+  that runs the same dep / contract-lint / required-checks /
+  allowed_paths gate sequence as the real `complete`, but never
+  writes `state.yaml`, `handoff.md`, the journal, or any git
+  commit / push. Exits 2 with the failing gate output when a
+  required gate fails, exit 0 with `DRY RUN: all required gates
+  would pass.` on success. `--dry-run` skips the `--summary` /
+  `--next-focus` requirement so agents can run it freely from
+  implementation context.
+- `tests/planctl_quality_gates_test.rb`: three new tests covering
+  dry-run state-immutability, dry-run propagating required-check
+  failures, and advance lint-demotion of phases whose sentinel
+  has been removed prematurely.
+
 - `planctl lint-contracts [--phase <phase-id> | --all]` — machine lint for
   phase contracts. It validates the effective three-file context law
   (`common + phase + execution`), required marker sections

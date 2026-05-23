@@ -47,7 +47,7 @@
 3. 指定 phase 时，`planctl resolve` 返回的结果，是唯一合法的当前 phase。
 4. 不得跳过 `depends_on` 检查，也不得手工判定“前置 phase 基本完成”。
 5. `advance --strict` 只有在真实 blocker 下才应阻断；占位合同不是 blocker，而是 `ACTION: promote_placeholder`。
-6. 若 `advance` 返回 `ACTION: promote_placeholder`，下一动作必须是先把两份合同升级成正式合同，再重跑同一条 strict 命令。
+6. 若 `advance` 返回 `ACTION: promote_placeholder`，下一动作必须是先把两份合同升级成正式合同，再重跑同一条 strict 命令。即使占位合同的 sentinel 已被删除，只要 `planctl lint-contracts` 仍有问题（marker 缺失、Production Wiring 空白、allowed_paths 空、完成判定含主观词等），`advance --strict` 仍会返回 `ACTION: promote_placeholder` + `STOP_REASON: lint_failed`，并把 lint problems 列出来——必须按列表逐项修好合同后再重跑 strict，不得通过"删 sentinel + 继续实施"绕过。
 
 ## 五、上下文装载规约
 
@@ -111,6 +111,7 @@
 11. 若 `complete` 的 commit 或 push 失败，`state.yaml` 仍会保持已完成状态（不回滚）；应当向用户报告 warning 原文并提示手动处置（鉴权、保护分支、pre-commit hook 等），而不是尝试手动 `git reset` 或伪造提交。
 12. 回退某个已完成 phase 时必须走 `ruby scripts/planctl revert <phase-id>`，不得手工 `git revert` / `git reset` 也不得手工改 `state.yaml`；script 会负责定位里程碑 commit、保护下游依赖、重写 state/handoff 并提交 ledger。
 13. 如果 `complete` 中途因进程崩溃、网络中断或 commit hook 失败而被打断，下一次开会话先跑 `ruby scripts/planctl repair-complete`，让脚本根据 `current_phase.stage`（`state_written` / `committed`）幂等地重放剩余的 commit / push 步骤；不得手工 `git commit`、手工 `git push` 或编辑 `state.yaml` 来"修齐"。repair-complete 在没有进行中完成时是 no-op，可以安全地放在恢复流程开头。
+14. 实施完成、准备 `complete` 之前若想确认 gate 是否能通过，可以先跑 `ruby scripts/planctl complete <phase-id> --dry-run`：脚本会跑完整套依赖检查 / 合同 lint / required checks / allowed_paths gate，但**不会**写 `state.yaml`、`handoff.md`、journal 或触发任何 git commit / push。dry-run 不接受 `--summary` / `--next-focus`，专门用于"会不会过 gate"的预演。dry-run 通过后再跑正式 `complete`。
 
 ## 九、压缩恢复规约
 

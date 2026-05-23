@@ -152,8 +152,14 @@ class PlanCtl
     end
   end
 
-  def complete(phase_id, summary:, next_focus:, continue_run: false)
+  def complete(phase_id, summary:, next_focus:, continue_run: false, dry_run: false)
     ensure_git_repo!
+
+    if dry_run
+      complete_dry_run(phase_id)
+      return
+    end
+
     if blank?(summary)
       warn "Cannot complete #{phase_id}: --summary is required and must be non-empty."
       warn "Summaries become the commit subject and the handoff ledger; a blank summary leaves the next session blind."
@@ -289,6 +295,69 @@ class PlanCtl
       puts
       advance(format: 'prompt', strict: true)
     end
+  end
+
+  # Pre-flight preview of `complete`. Runs the exact same dependency,
+  # contract-lint, required-checks, allowed_paths gate sequence (so the
+  # outcome here matches what `complete` would do), but never writes to
+  # state.yaml / handoff.md / journal / git. Useful when an agent finishes
+  # implementation and wants to confirm gate readiness before committing
+  # to the real flow.
+  def complete_dry_run(phase_id)
+    phase = fetch_phase(phase_id)
+    state = load_state
+    completed = Array(state['completed_phases'])
+
+    puts '=== Phase-Contract complete (dry-run) ==='
+    puts "Target phase: #{phase_id} #{phase['title']}"
+    puts 'Mode: read-only. No state, handoff, journal, or git changes will be made.'
+    puts
+
+    missing = Array(phase['depends_on']) - completed
+    unless missing.empty?
+      puts "FAIL: depends_on not satisfied (missing: #{missing.join(', ')})"
+      exit 2
+    end
+    puts 'ok: depends_on satisfied'
+
+    if completed.include?(phase_id)
+      puts 'note: phase already completed; a real `complete` call would no-op.'
+      return
+    end
+
+    contract_lint = run_contract_lint_check(phase) # no journal_phase_id → journal untouched
+    if contract_lint['status'] == 'passed'
+      puts "ok: contract-lint (#{contract_lint['duration_seconds']}s)"
+    else
+      puts 'FAIL: contract-lint'
+      puts contract_lint['output_tail'] unless blank?(contract_lint['output_tail'].to_s)
+      exit 2
+    end
+
+    required = run_declared_checks(phase, kind: 'required')
+    failed_required = required.reject { |r| r['status'] == 'passed' }
+    if failed_required.empty?
+      required.each { |r| puts "ok: required check #{r['id']} (#{r['duration_seconds']}s)" }
+    else
+      failed_required.each { |r| puts format_check_failure(r, required: true) }
+      exit 2
+    end
+
+    if precheck_allowed_paths!(phase)
+      puts 'ok: allowed_paths gate (no out-of-scope staged paths)'
+    else
+      puts 'FAIL: allowed_paths gate'
+      exit 2
+    end
+
+    optional = run_declared_checks(phase, kind: 'optional')
+    optional.each do |r|
+      tag = r['status'] == 'passed' ? 'ok' : 'warn'
+      puts "#{tag}: optional check #{r['id']} status=#{r['status']}"
+    end
+
+    puts
+    puts 'DRY RUN: all required gates would pass. Run without --dry-run to write state and create the milestone commit.'
   end
 
   # Revert a previously completed phase:
@@ -509,6 +578,25 @@ class PlanCtl
     ensure_git_repo!
     state = load_state
     result = build_advance_result(state)
+
+    # Strict-only embedded lint: if a phase has no placeholder sentinel
+    # (so build_advance_result let it through as `implement`), but the
+    # formal contract still fails lint, demote to promote_placeholder
+    # with explicit lint_problems. This closes the "delete the sentinel
+    # to bypass" loophole without changing the loop semantics agents
+    # already know.
+    if strict && result['action'] == 'implement' && result.dig('phase', 'phase_id')
+      target = fetch_phase(result['phase']['phase_id'])
+      lint = lint_phase_contract(target, targeted: true, current_phase_id: target['id'])
+      unless lint['problems'].empty?
+        result = result.merge(
+          'action' => 'promote_placeholder',
+          'stop_reason' => 'lint_failed',
+          'lint_problems' => lint['problems'],
+          'placeholder_contract_files' => Array(result['placeholder_contract_files'])
+        )
+      end
+    end
 
     if result['action'] == 'implement' && result.dig('phase', 'phase_id')
       target = fetch_phase(result['phase']['phase_id'])
@@ -1864,15 +1952,27 @@ class PlanCtl
         puts
         puts 'Next internal action: implement this phase now. Do not ask for phase-boundary confirmation.'
       when 'promote_placeholder'
-        puts 'Placeholder contracts to upgrade before implementation:'
-        result['placeholder_contract_files'].each { |path| puts "- #{path}" }
-        puts
-        puts 'Next internal actions:'
-        puts '1. Upgrade both phase and execution contracts to formal, objective contracts.'
-        puts '2. Rerun `ruby scripts/planctl advance --strict`.'
-        puts '3. Start implementation only when ACTION becomes implement.'
-        puts
-        puts 'This is a Golden-Loop internal action, not a user confirmation point.'
+        if result['lint_problems']
+          puts 'Phase contracts removed placeholder sentinels but still fail contract lint:'
+          result['lint_problems'].each { |problem| puts "- #{problem}" }
+          puts
+          puts 'Next internal actions:'
+          puts '1. Fix the lint problems in plan/phases/* and plan/execution/* (markers / allowed_paths / wording / production wiring).'
+          puts '2. Rerun `ruby scripts/planctl advance --strict`.'
+          puts '3. Start implementation only when ACTION becomes implement.'
+          puts
+          puts 'Deleting the placeholder sentinel is not enough — the formal contract must satisfy `planctl lint-contracts`.'
+        else
+          puts 'Placeholder contracts to upgrade before implementation:'
+          result['placeholder_contract_files'].each { |path| puts "- #{path}" }
+          puts
+          puts 'Next internal actions:'
+          puts '1. Upgrade both phase and execution contracts to formal, objective contracts.'
+          puts '2. Rerun `ruby scripts/planctl advance --strict`.'
+          puts '3. Start implementation only when ACTION becomes implement.'
+          puts
+          puts 'This is a Golden-Loop internal action, not a user confirmation point.'
+        end
       when 'finalize'
         puts result['message']
         puts "NEXT_COMMAND: #{result['finalize_command']}"
@@ -2740,7 +2840,7 @@ def usage
       ruby scripts/planctl advance [--format prompt|json] [--strict]
       ruby scripts/planctl status [--format text|json]
       ruby scripts/planctl lint-contracts [--phase <phase-id> | --all]
-      ruby scripts/planctl complete <phase-id> [--summary TEXT] [--next-focus TEXT] [--continue]
+      ruby scripts/planctl complete <phase-id> [--summary TEXT] [--next-focus TEXT] [--continue] [--dry-run]
       ruby scripts/planctl revert <phase-id> [--mode revert|reset] [--summary TEXT]
       ruby scripts/planctl handoff [--format prompt|json] [--write]
       ruby scripts/planctl resume [--strict] [--brief]
@@ -2828,12 +2928,13 @@ when 'lint-contracts'
   end
   planctl.lint_contracts(phase_id: options[:phase_id], all: options[:all])
 when 'complete'
-  options = { summary: nil, next_focus: nil, continue: false }
+  options = { summary: nil, next_focus: nil, continue: false, dry_run: false }
   parser = OptionParser.new do |opts|
     opts.banner = usage
     opts.on('--summary TEXT', 'Concise completion summary to persist for resume') { |value| options[:summary] = value }
     opts.on('--next-focus TEXT', 'Concise note about what should happen next') { |value| options[:next_focus] = value }
     opts.on('--continue', 'Resolve the next internal action immediately after completion') { options[:continue] = true }
+    opts.on('--dry-run', 'Run gate sequence only; do not write state, handoff, journal, or git') { options[:dry_run] = true }
   end
   parser.parse!(ARGV)
   phase_id = ARGV.shift
@@ -2841,7 +2942,7 @@ when 'complete'
     warn parser.to_s
     exit 1
   end
-  planctl.complete(phase_id, summary: options[:summary], next_focus: options[:next_focus], continue_run: options[:continue])
+  planctl.complete(phase_id, summary: options[:summary], next_focus: options[:next_focus], continue_run: options[:continue], dry_run: options[:dry_run])
 when 'revert'
   options = { mode: 'revert', summary: nil }
   parser = OptionParser.new do |opts|
